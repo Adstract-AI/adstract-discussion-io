@@ -51,6 +51,22 @@ export interface SetApiKeyRequest {
   apiKey: string
 }
 
+export type AiModel = 'gpt-5.2' | 'gpt-5.3-chat-latest' | 'gpt-5-mini' | 'gpt-5-nano'
+export type AgentLanguage = 'English' | 'Macedonian'
+
+export interface PromptSemantics {
+  general: string
+  inferQuestion: string
+  participation: string
+  similarQuestion: string
+}
+
+export interface SetAiConfigRequest {
+  model: AiModel
+  language: AgentLanguage
+  prompts: PromptSemantics
+}
+
 export interface SetContextWindowRequest {
   contextWindow: number
 }
@@ -98,6 +114,7 @@ export interface StoredData {
 
 export interface FetchRecentMessagesRequest {
   limit: number
+  deepFetch?: boolean
 }
 
 export interface RecentMessagesResult {
@@ -165,6 +182,7 @@ export interface RuntimeMessageMap {
   SETTINGS_EXPORT_SESSIONS: undefined
   SETTINGS_GET: undefined
   SETTINGS_SET_API_KEY: SetApiKeyRequest
+  SETTINGS_SET_AI_CONFIG: SetAiConfigRequest
   SETTINGS_SET_CONTEXT_WINDOW: SetContextWindowRequest
   FETCH_RECENT_MESSAGES: FetchRecentMessagesRequest
   RECENT_MESSAGES_RESULT: RecentMessagesResult
@@ -200,6 +218,7 @@ export const MESSAGE_TYPES = {
   SETTINGS_EXPORT_SESSIONS: 'SETTINGS_EXPORT_SESSIONS',
   SETTINGS_GET: 'SETTINGS_GET',
   SETTINGS_SET_API_KEY: 'SETTINGS_SET_API_KEY',
+  SETTINGS_SET_AI_CONFIG: 'SETTINGS_SET_AI_CONFIG',
   SETTINGS_SET_CONTEXT_WINDOW: 'SETTINGS_SET_CONTEXT_WINDOW',
   FETCH_RECENT_MESSAGES: 'FETCH_RECENT_MESSAGES',
   RECENT_MESSAGES_RESULT: 'RECENT_MESSAGES_RESULT',

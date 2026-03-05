@@ -1,27 +1,52 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import {
+  type AgentLanguage,
+  type AiModel,
   type DiscussionRecord,
   MESSAGE_TYPES,
   type ChatMessage,
   type PopupViewState,
+  type PromptSemantics,
   type RuntimeMessage,
   type SessionRecord,
 } from '../types/chat'
 import TERMS_OF_SERVICE_TEXT from '../../TERMS_OF_SERVICE.md?raw'
+import PRIVACY_POLICY_TEXT from '../../PRIVACY_POLICY.md?raw'
+import ADSTRACT_TEXT from '../../ADSTRACT.md?raw'
 
 const DEFAULT_MESSAGE_WINDOW = 20
 const DEV_MOCK_BASE = Date.now() - 1000 * 60 * 60
 const POPUP_UI_STATE_KEY = 'discussionAssistantPopupUiStateV1'
 const TERMS_ACCEPTED_KEY = 'discussionAssistantTermsAcceptedV1'
+const AI_MODEL_OPTIONS: ReadonlyArray<{ value: AiModel; label: string }> = [
+  { value: 'gpt-5.2', label: 'GPT-5.2' },
+  { value: 'gpt-5.3-chat-latest', label: 'GPT-5.3 Chat Latest' },
+  { value: 'gpt-5-mini', label: 'GPT-5 Mini' },
+  { value: 'gpt-5-nano', label: 'GPT-5 Nano' },
+]
+const LANGUAGE_OPTIONS: readonly AgentLanguage[] = ['Macedonian', 'English']
+const DEFAULT_PROMPT_SEMANTICS: PromptSemantics = {
+  general: 'Use only provided context. Keep responses concise, practical, and suitable for live class discussion.',
+  inferQuestion: 'Infer the likely professor question from student replies. Keep it clear and natural.',
+  participation: 'Write a short student-style participation message with a new angle, not repetition.',
+  similarQuestion: 'Generate a semantically related follow-up question that keeps discussion moving.',
+}
 
 type ViewMode = 'assistant' | 'debug'
 type AssistantFlowStage = 'idle' | 'collecting' | 'collected' | 'awaiting-analysis' | 'participating' | 'awaiting-suggestion' | 'awaiting-similar-question'
 type SettingsTab = 'sessions' | 'ai' | 'context'
+type LegalTab = 'terms' | 'privacy'
 type PendingTermsAction =
   | { type: 'start' }
   | { type: 'restore'; sessionId: string }
   | { type: 'restart' }
   | null
+
+interface StoredLegalAcceptance {
+  termsAccepted?: boolean
+  privacyAccepted?: boolean
+  acceptedAt?: number
+}
 
 interface PopupUiStateCache {
   flowStage: AssistantFlowStage
@@ -343,14 +368,19 @@ export default function Popup() {
   const [selectedSessionId, setSelectedSessionId] = useState<string>()
   const [showOldSessions, setShowOldSessions] = useState(false)
   const [showHowItWorks, setShowHowItWorks] = useState(false)
+  const [showWhoWeAreModal, setShowWhoWeAreModal] = useState(false)
   const [sessionSidebarCollapsed, setSessionSidebarCollapsed] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [showTermsModal, setShowTermsModal] = useState(false)
+  const [legalTab, setLegalTab] = useState<LegalTab>('terms')
   const [hasAcceptedTerms, setHasAcceptedTerms] = useState(false)
   const [pendingTermsAction, setPendingTermsAction] = useState<PendingTermsAction>(null)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('sessions')
   const [settingsApiKey, setSettingsApiKey] = useState('')
   const [settingsHasApiKey, setSettingsHasApiKey] = useState(false)
+  const [settingsAiModel, setSettingsAiModel] = useState<AiModel>('gpt-5-mini')
+  const [settingsLanguage, setSettingsLanguage] = useState<AgentLanguage>('Macedonian')
+  const [settingsPromptSemantics, setSettingsPromptSemantics] = useState<PromptSemantics>(DEFAULT_PROMPT_SEMANTICS)
   const [settingsContextWindow, setSettingsContextWindow] = useState(DEFAULT_MESSAGE_WINDOW)
   const [contextWindow, setContextWindow] = useState(DEFAULT_MESSAGE_WINDOW)
   const [settingsStatus, setSettingsStatus] = useState('')
@@ -373,7 +403,7 @@ export default function Popup() {
   const showDebugView = import.meta.env.DEV
   const compatibilityKnown = typeof state.activeTabUrl !== 'undefined'
   const unsupportedOnlyView = compatibilityKnown && !state.isCompatibleTarget
-  const isWelcomeScreen = state.sessionRequired && !showOldSessions && !showHowItWorks && !unsupportedOnlyView
+  const isWelcomeScreen = state.sessionRequired && !showOldSessions && !unsupportedOnlyView
 
   const hydratePopupUiState = async (): Promise<void> => {
     try {
@@ -542,9 +572,30 @@ export default function Popup() {
   useEffect(() => {
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPES.SETTINGS_GET })
       .then((response: unknown) => {
-        const typed = response as { contextWindow?: number; apiKey?: string; hasApiKey?: boolean } | undefined
+        const typed = response as {
+          contextWindow?: number
+          apiKey?: string
+          hasApiKey?: boolean
+          aiModel?: AiModel
+          aiLanguage?: AgentLanguage
+          promptSemantics?: Partial<PromptSemantics>
+        } | undefined
         setSettingsApiKey(typed?.apiKey ?? '')
         setSettingsHasApiKey(Boolean(typed?.hasApiKey))
+        if (typed?.aiModel && AI_MODEL_OPTIONS.some((entry) => entry.value === typed.aiModel)) {
+          setSettingsAiModel(typed.aiModel)
+        }
+        if (typed?.aiLanguage && LANGUAGE_OPTIONS.includes(typed.aiLanguage)) {
+          setSettingsLanguage(typed.aiLanguage)
+        }
+        if (typed?.promptSemantics) {
+          setSettingsPromptSemantics({
+            general: typed.promptSemantics.general?.trim() || DEFAULT_PROMPT_SEMANTICS.general,
+            inferQuestion: typed.promptSemantics.inferQuestion?.trim() || DEFAULT_PROMPT_SEMANTICS.inferQuestion,
+            participation: typed.promptSemantics.participation?.trim() || DEFAULT_PROMPT_SEMANTICS.participation,
+            similarQuestion: typed.promptSemantics.similarQuestion?.trim() || DEFAULT_PROMPT_SEMANTICS.similarQuestion,
+          })
+        }
         if (typed?.contextWindow && Number.isFinite(typed.contextWindow)) {
           const bounded = Math.max(1, Math.min(200, Math.round(typed.contextWindow)))
           setContextWindow(bounded)
@@ -556,8 +607,8 @@ export default function Popup() {
   useEffect(() => {
     void chrome.storage.local.get(TERMS_ACCEPTED_KEY)
       .then((raw: Record<string, unknown>) => {
-        const value = raw[TERMS_ACCEPTED_KEY]
-        setHasAcceptedTerms(Boolean(value && (value as { accepted?: boolean }).accepted))
+        const value = raw[TERMS_ACCEPTED_KEY] as StoredLegalAcceptance | undefined
+        setHasAcceptedTerms(Boolean(value?.termsAccepted && value?.privacyAccepted))
       })
       .catch(() => {
         setHasAcceptedTerms(false)
@@ -1179,7 +1230,6 @@ export default function Popup() {
   }
 
   const onViewOldSessions = (): void => {
-    setShowHowItWorks(false)
     setShowOldSessions(true)
     if (!selectedSessionId && sessionsForSidebar.length > 0) {
       setSelectedSessionId(sessionsForSidebar[0].id)
@@ -1187,8 +1237,11 @@ export default function Popup() {
   }
 
   const onOpenHowItWorks = (): void => {
-    setShowOldSessions(false)
     setShowHowItWorks(true)
+  }
+
+  const onOpenWhoWeAre = (): void => {
+    setShowWhoWeAreModal(true)
   }
 
   const onOpenSessionActions = (event: MouseEvent, session: SessionRecord): void => {
@@ -1267,9 +1320,10 @@ export default function Popup() {
     const pending = pendingTermsAction
     void chrome.storage.local.set({
       [TERMS_ACCEPTED_KEY]: {
-        accepted: true,
+        termsAccepted: true,
+        privacyAccepted: true,
         acceptedAt: Date.now(),
-      },
+      } satisfies StoredLegalAcceptance,
     }).then(() => {
       setHasAcceptedTerms(true)
       setShowTermsModal(false)
@@ -1298,7 +1352,18 @@ export default function Popup() {
 
   const onOpenTerms = (): void => {
     setPendingTermsAction(null)
+    setLegalTab('terms')
     setShowTermsModal(true)
+  }
+
+  const onDevClearLegalAcceptance = (): void => {
+    void chrome.storage.local.remove(TERMS_ACCEPTED_KEY).then(() => {
+      setHasAcceptedTerms(false)
+      setDebugActionStatus('Legal acceptance cleared (dev).')
+    }).catch((error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error)
+      setDebugActionStatus(`Failed to clear legal acceptance: ${text}`)
+    })
   }
 
   const onTitleClick = (): void => {
@@ -1362,17 +1427,39 @@ export default function Popup() {
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.SETTINGS_GET,
     }).then((response: unknown) => {
-      const typed = response as { apiKey?: string; hasApiKey?: boolean; error?: string } | undefined
+      const typed = response as {
+        apiKey?: string
+        hasApiKey?: boolean
+        contextWindow?: number
+        aiModel?: AiModel
+        aiLanguage?: AgentLanguage
+        promptSemantics?: Partial<PromptSemantics>
+        error?: string
+      } | undefined
       if (typed?.error) {
         setSettingsStatus(`Failed to load settings: ${typed.error}`)
         return
       }
       setSettingsApiKey(typed?.apiKey ?? '')
       setSettingsHasApiKey(Boolean(typed?.hasApiKey))
-      if (typed && typeof (typed as { contextWindow?: number }).contextWindow === 'number') {
-        const bounded = Math.max(1, Math.min(200, Math.round((typed as { contextWindow?: number }).contextWindow ?? DEFAULT_MESSAGE_WINDOW)))
+      if (typed && typeof typed.contextWindow === 'number') {
+        const bounded = Math.max(1, Math.min(200, Math.round(typed.contextWindow ?? DEFAULT_MESSAGE_WINDOW)))
         setSettingsContextWindow(bounded)
         setContextWindow(bounded)
+      }
+      if (typed?.aiModel && AI_MODEL_OPTIONS.some((entry) => entry.value === typed.aiModel)) {
+        setSettingsAiModel(typed.aiModel)
+      }
+      if (typed?.aiLanguage && LANGUAGE_OPTIONS.includes(typed.aiLanguage)) {
+        setSettingsLanguage(typed.aiLanguage)
+      }
+      if (typed?.promptSemantics) {
+        setSettingsPromptSemantics({
+          general: typed.promptSemantics.general?.trim() || DEFAULT_PROMPT_SEMANTICS.general,
+          inferQuestion: typed.promptSemantics.inferQuestion?.trim() || DEFAULT_PROMPT_SEMANTICS.inferQuestion,
+          participation: typed.promptSemantics.participation?.trim() || DEFAULT_PROMPT_SEMANTICS.participation,
+          similarQuestion: typed.promptSemantics.similarQuestion?.trim() || DEFAULT_PROMPT_SEMANTICS.similarQuestion,
+        })
       }
     })
   }
@@ -1392,6 +1479,62 @@ export default function Popup() {
       }
       setSettingsStatus('API key saved.')
       setSettingsHasApiKey(Boolean(settingsApiKey.trim()))
+    }).catch((error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error)
+      setSettingsStatus(`Save failed: ${text}`)
+    })
+  }
+
+  const onPromptSemanticsChange = (field: keyof PromptSemantics, value: string): void => {
+    setSettingsPromptSemantics((previous) => ({
+      ...previous,
+      [field]: value,
+    }))
+  }
+
+  const onSaveAiConfig = (): void => {
+    setSettingsStatus('Saving AI settings...')
+    const payload = {
+      model: settingsAiModel,
+      language: settingsLanguage,
+      prompts: {
+        general: settingsPromptSemantics.general.trim() || DEFAULT_PROMPT_SEMANTICS.general,
+        inferQuestion: settingsPromptSemantics.inferQuestion.trim() || DEFAULT_PROMPT_SEMANTICS.inferQuestion,
+        participation: settingsPromptSemantics.participation.trim() || DEFAULT_PROMPT_SEMANTICS.participation,
+        similarQuestion: settingsPromptSemantics.similarQuestion.trim() || DEFAULT_PROMPT_SEMANTICS.similarQuestion,
+      },
+    }
+
+    void chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.SETTINGS_SET_AI_CONFIG,
+      payload,
+    }).then((response: unknown) => {
+      const typed = response as {
+        success?: boolean
+        aiModel?: AiModel
+        aiLanguage?: AgentLanguage
+        promptSemantics?: Partial<PromptSemantics>
+        error?: string
+      } | undefined
+      if (typed?.error) {
+        setSettingsStatus(`Save failed: ${typed.error}`)
+        return
+      }
+      if (typed?.aiModel && AI_MODEL_OPTIONS.some((entry) => entry.value === typed.aiModel)) {
+        setSettingsAiModel(typed.aiModel)
+      }
+      if (typed?.aiLanguage && LANGUAGE_OPTIONS.includes(typed.aiLanguage)) {
+        setSettingsLanguage(typed.aiLanguage)
+      }
+      if (typed?.promptSemantics) {
+        setSettingsPromptSemantics({
+          general: typed.promptSemantics.general?.trim() || DEFAULT_PROMPT_SEMANTICS.general,
+          inferQuestion: typed.promptSemantics.inferQuestion?.trim() || DEFAULT_PROMPT_SEMANTICS.inferQuestion,
+          participation: typed.promptSemantics.participation?.trim() || DEFAULT_PROMPT_SEMANTICS.participation,
+          similarQuestion: typed.promptSemantics.similarQuestion?.trim() || DEFAULT_PROMPT_SEMANTICS.similarQuestion,
+        })
+      }
+      setSettingsStatus('AI settings saved.')
     }).catch((error: unknown) => {
       const text = error instanceof Error ? error.message : String(error)
       setSettingsStatus(`Save failed: ${text}`)
@@ -1517,8 +1660,31 @@ export default function Popup() {
               E
             </button>
           ) : null}
+          {showDebugView ? (
+            <button
+              className="dev-mock-error-btn"
+              onClick={onDevClearLegalAcceptance}
+              type="button"
+              title="Clear legal acceptance"
+              aria-label="Clear legal acceptance"
+            >
+              L
+            </button>
+          ) : null}
         </div>
         <div className="window-side-controls">
+          <button
+            className="settings-toggle-btn"
+            onClick={onOpenWhoWeAre}
+            type="button"
+            title="Who we are"
+            aria-label="Open who we are"
+          >
+            <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="2" />
+              <path d="M6 20c1.2-3 3.4-4.5 6-4.5s4.8 1.5 6 4.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          </button>
           <button
             className="settings-toggle-btn"
             onClick={onOpenHowItWorks}
@@ -1532,8 +1698,8 @@ export default function Popup() {
             className="settings-toggle-btn"
             onClick={onOpenTerms}
             type="button"
-            title="Terms of Service"
-            aria-label="Open terms of service"
+            title="Legal"
+            aria-label="Open legal documents"
           >
             <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
               <path d="M8 3h6l5 5v13H8z" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
@@ -1556,7 +1722,10 @@ export default function Popup() {
 
       <header className="popup-header">
         {unsupportedOnlyView ? (
-          <h1>Discussion.IO</h1>
+          <h1 className="title-brand">
+            <img className="title-logo" src="/discuss-io-logo.png" alt="" aria-hidden="true" />
+            <span className="title-text">Discussion.IO</span>
+          </h1>
         ) : (
           <>
             <div className="popup-header-top">
@@ -1566,10 +1735,13 @@ export default function Popup() {
                   onClick={onTitleClick}
                   type="button"
                 >
-                  Discussion.IO
+                  <span className="title-brand">
+                    <img className="title-logo" src="/discuss-io-logo.png" alt="" aria-hidden="true" />
+                    <span className="title-text">Discussion.IO</span>
+                  </span>
                 </button>
               </h1>
-              {!isWelcomeScreen && !showHowItWorks ? (
+              {!isWelcomeScreen ? (
                 <div className="session-status-inline">
                   <span
                     className={`status-dot ${assistantStatusClass} custom-tooltip-trigger`}
@@ -1600,77 +1772,7 @@ export default function Popup() {
           {(!showDebugView || viewMode === 'assistant') ? (
             <section className={isWelcomeScreen ? 'welcome-fullscreen' : 'stack'}>
               {state.sessionRequired ? (
-                showHowItWorks ? (
-                  <section className="card how-it-works-card">
-                    <div className="how-it-works-header">
-                      <div>
-                        <h2>How Discussion.IO Works</h2>
-                        <p className="how-it-works-subtitle">
-                          A practical flow from context capture to final participation.
-                        </p>
-                      </div>
-                      <button
-                        className="mini-btn how-it-works-back-btn"
-                        onClick={() => setShowHowItWorks(false)}
-                        type="button"
-                      >
-                        Back
-                      </button>
-                    </div>
-
-                    <div className="how-it-works-content">
-                      <section className="how-it-works-section">
-                        <h3>Sessions</h3>
-                        <p>
-                          Start each class as a separate session. Sessions store all inferred discussion questions,
-                          captured context, and every participation you sent from the extension.
-                        </p>
-                        <ul>
-                          <li>Create a new session from the welcome screen.</li>
-                          <li>Reopen old sessions to review discussion history.</li>
-                          <li>Restore any old session as active from the sessions list context menu.</li>
-                        </ul>
-                      </section>
-
-                      <section className="how-it-works-section">
-                        <h3>Discussions</h3>
-                        <p>
-                          Click Analyze to collect the latest context messages from BBB chat, then choose whether to
-                          proceed as a new discussion or continue the previous one.
-                        </p>
-                        <ul>
-                          <li>Proceed to create the inferred question from the captured context.</li>
-                          <li>Continue previous discussion to keep working on the latest inferred question.</li>
-                          <li>Use participation actions to send your own text, request a suggestion, or ask a similar question.</li>
-                        </ul>
-                        <p>
-                          Clicking a question bubble opens the exact context messages that were used for that discussion.
-                        </p>
-                      </section>
-
-                      <section className="how-it-works-section">
-                        <h3>Settings</h3>
-                        <p>
-                          Configure AI and data controls inside Settings. Your data is kept in local extension storage.
-                        </p>
-                        <ul>
-                          <li>AI tab: save or remove your OpenAI API key.</li>
-                          <li>Context tab: set how many chat messages are captured for analysis.</li>
-                          <li>Sessions tab: download all sessions JSON or clear stored history.</li>
-                        </ul>
-                      </section>
-
-                      <section className="how-it-works-section">
-                        <h3>Interaction Notes</h3>
-                        <ul>
-                          <li>The extension autofills BBB chat input but does not auto-send.</li>
-                          <li>Press Enter twice in the extension input to confirm and send.</li>
-                          <li>Unsupported pages show an incompatibility warning and disable controls.</li>
-                        </ul>
-                      </section>
-                    </div>
-                  </section>
-                ) : showOldSessions ? (
+                showOldSessions ? (
                   <section className={`assistant-shell ${sessionSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
                     <aside className="session-sidebar">
                       <div className="session-sidebar-header">
@@ -1817,7 +1919,13 @@ export default function Popup() {
                           How It Works
                         </button>
                       </div>
-                      <small className="session-gate-footer">Adstract 2026 ©</small>
+                      <button
+                        className="session-gate-footer"
+                        onClick={onOpenWhoWeAre}
+                        type="button"
+                      >
+                        Adstract 2026 ©
+                      </button>
                     </section>
                   </section>
                 )
@@ -2206,7 +2314,7 @@ export default function Popup() {
 
       {selectedDiscussion ? (
         <div className="modal-backdrop" onClick={onCloseDiscussionContext}>
-          <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+          <div className="modal-card discussion-context-modal" onClick={(event) => event.stopPropagation()}>
             <div className="section-header">
               <h2>Discussion Context</h2>
               <button className="mini-btn" onClick={onCloseDiscussionContext} type="button">
@@ -2288,28 +2396,146 @@ export default function Popup() {
         <div className="modal-backdrop" onClick={onCloseTermsModal}>
           <div className="modal-card terms-modal" onClick={(event) => event.stopPropagation()}>
             <div className="section-header">
-              <h2>Terms of Service</h2>
+              <h2>Legal</h2>
               <button className="mini-btn" onClick={onCloseTermsModal} type="button">
                 Close
               </button>
             </div>
+            <div className="legal-tabs">
+              <button
+                className={`legal-tab ${legalTab === 'terms' ? 'active' : ''}`}
+                onClick={() => setLegalTab('terms')}
+                type="button"
+              >
+                Terms of Service
+              </button>
+              <button
+                className={`legal-tab ${legalTab === 'privacy' ? 'active' : ''}`}
+                onClick={() => setLegalTab('privacy')}
+                type="button"
+              >
+                Privacy Policy
+              </button>
+            </div>
             <div className="terms-content">
               <div className="terms-markdown">
-                {renderTermsMarkdown(TERMS_OF_SERVICE_TEXT)}
+                {renderTermsMarkdown(legalTab === 'terms' ? TERMS_OF_SERVICE_TEXT : PRIVACY_POLICY_TEXT)}
               </div>
             </div>
             {pendingTermsAction ? (
               <div className="terms-actions">
-                <>
+                <small className="muted">
+                  To continue using Adstract Discussion Assistant – Disusion.IO, you must first review and accept the Terms of Service and Privacy Policy.
+                </small>
+                <div className="terms-actions-buttons">
                   <button className="ghost-btn" onClick={onCloseTermsModal} type="button">
                     Decline
                   </button>
                   <button className="terms-accept-btn" onClick={onAcceptTerms} type="button">
-                    Accept Terms
+                    Accept
                   </button>
-                </>
+                </div>
               </div>
             ) : null}
+          </div>
+        </div>
+      ) : null}
+
+      {showWhoWeAreModal ? (
+        <div className="modal-backdrop" onClick={() => setShowWhoWeAreModal(false)}>
+          <div className="modal-card about-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="section-header">
+              <h2>The team behind Discussion.IO</h2>
+              <button className="mini-btn" onClick={() => setShowWhoWeAreModal(false)} type="button">
+                Close
+              </button>
+            </div>
+            <div className="about-logo-wrap">
+              <img className="about-logo" src="/adstract-logo.png" alt="Adstract logo" />
+            </div>
+            <div className="terms-content">
+              <div className="terms-markdown">
+                {renderTermsMarkdown(ADSTRACT_TEXT)}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {showHowItWorks ? (
+        <div className="modal-backdrop" onClick={() => setShowHowItWorks(false)}>
+          <div className="modal-card how-it-works-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="how-it-works-header">
+              <div>
+                <h2>How Discussion.IO Works</h2>
+                <p className="how-it-works-subtitle">
+                  A practical flow from context capture to final participation.
+                </p>
+              </div>
+              <button
+                className="mini-btn how-it-works-back-btn"
+                onClick={() => setShowHowItWorks(false)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="how-it-works-content">
+              <section className="how-it-works-section">
+                <h3>Sessions</h3>
+                <p>
+                  Start each class as a separate session. Sessions store inferred questions, captured context,
+                  and every participation message sent from the extension UI.
+                </p>
+                <ul>
+                  <li>Create a new session from the welcome screen.</li>
+                  <li>Open Old Sessions to browse history in read-only mode.</li>
+                  <li>Right-click a saved session to restore it as the active session.</li>
+                  <li>When restoring a session, the current active session is ended automatically.</li>
+                </ul>
+              </section>
+
+              <section className="how-it-works-section">
+                <h3>Discussions</h3>
+                <p>
+                  Click Analyze Discussion to capture the last X student messages from BBB chat (X is
+                  configurable in Settings → Context), then choose how to proceed.
+                </p>
+                <ul>
+                  <li>Cancel: discard captured context and return to idle.</li>
+                  <li>Proceed to New Discussion: generate a new inferred question from captured context.</li>
+                  <li>Continue Previous Discussion: reuse the latest inferred question and continue with fresh context.</li>
+                  <li>Participation actions: Don’t Participate, Give Suggestion, or Get Similar Question.</li>
+                  <li>Enter + Enter confirms sending your draft to extension history and BBB chat input/send.</li>
+                </ul>
+                <p>
+                  Clicking any question bubble opens the exact stored context messages used for that discussion.
+                </p>
+              </section>
+
+              <section className="how-it-works-section">
+                <h3>Settings</h3>
+                <p>
+                  Configure AI, context, and storage controls in Settings. Session history and preferences are
+                  stored in extension local storage.
+                </p>
+                <ul>
+                  <li>AI tab: set OpenAI API key, model, language, and prompt semantics.</li>
+                  <li>Context tab: set capture size (X messages) used by Analyze Discussion.</li>
+                  <li>Sessions tab: export sessions JSON or clear all saved history.</li>
+                </ul>
+              </section>
+
+              <section className="how-it-works-section">
+                <h3>Legal and Compatibility</h3>
+                <ul>
+                  <li>Before first create/restore/restart session, you must accept both Terms and Privacy.</li>
+                  <li>Legal documents are always available from the Legal icon in the top-right controls.</li>
+                  <li>Unsupported pages show a compatibility warning and disable action controls.</li>
+                </ul>
+              </section>
+            </div>
           </div>
         </div>
       ) : null}
@@ -2362,7 +2588,9 @@ export default function Popup() {
                   </>
                 ) : settingsTab === 'ai' ? (
                   <>
-                    <p className="muted settings-note">Configure OpenAI key for question/suggestion generation.</p>
+                    <p className="muted settings-note">
+                      API key for OpenAI requests. Configure model, language, and prompt semantics.
+                    </p>
                     {!settingsHasApiKey ? (
                       <>
                         <div className="settings-field">
@@ -2395,6 +2623,79 @@ export default function Popup() {
                         </div>
                       </>
                     )}
+                    <div className="settings-field">
+                      <label htmlFor="ai-model-select">Model</label>
+                      <select
+                        id="ai-model-select"
+                        value={settingsAiModel}
+                        onChange={(event) => setSettingsAiModel(event.target.value as AiModel)}
+                      >
+                        {AI_MODEL_OPTIONS.map((model) => (
+                          <option key={model.value} value={model.value}>
+                            {model.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="settings-field">
+                      <label htmlFor="ai-language-select">Response language</label>
+                      <select
+                        id="ai-language-select"
+                        value={settingsLanguage}
+                        onChange={(event) => setSettingsLanguage(event.target.value as AgentLanguage)}
+                      >
+                        {LANGUAGE_OPTIONS.map((language) => (
+                          <option key={language} value={language}>
+                            {language}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="settings-key-preview">
+                      <small>Current runtime</small>
+                      <code>{settingsAiModel} · {settingsLanguage}</code>
+                    </div>
+                    <div className="settings-field">
+                      <label htmlFor="prompt-general">Default semantic guidance</label>
+                      <textarea
+                        id="prompt-general"
+                        value={settingsPromptSemantics.general}
+                        onChange={(event) => onPromptSemanticsChange('general', event.target.value)}
+                        rows={3}
+                      />
+                    </div>
+                    <div className="settings-field">
+                      <label htmlFor="prompt-infer">Infer question semantics</label>
+                      <textarea
+                        id="prompt-infer"
+                        value={settingsPromptSemantics.inferQuestion}
+                        onChange={(event) => onPromptSemanticsChange('inferQuestion', event.target.value)}
+                        rows={3}
+                      />
+                    </div>
+                    <div className="settings-field">
+                      <label htmlFor="prompt-participation">Participation semantics</label>
+                      <textarea
+                        id="prompt-participation"
+                        value={settingsPromptSemantics.participation}
+                        onChange={(event) => onPromptSemanticsChange('participation', event.target.value)}
+                        rows={3}
+                      />
+                    </div>
+                    <div className="settings-field">
+                      <label htmlFor="prompt-similar-question">Similar-question semantics</label>
+                      <textarea
+                        id="prompt-similar-question"
+                        value={settingsPromptSemantics.similarQuestion}
+                        onChange={(event) => onPromptSemanticsChange('similarQuestion', event.target.value)}
+                        rows={3}
+                      />
+                    </div>
+                    <div className="settings-actions">
+                      <button onClick={onSaveAiConfig} type="button">
+                        Save AI Settings
+                      </button>
+                    </div>
                   </>
                 ) : (
                   <>

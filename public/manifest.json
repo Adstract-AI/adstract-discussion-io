@@ -25,6 +25,17 @@
   ],
   "action": {
     "default_title": "Discussion.IO",
-    "default_popup": "index.html"
+    "default_popup": "index.html",
+    "default_icon": {
+      "16": "discuss-io-logo.png",
+      "32": "discuss-io-logo.png",
+      "48": "discuss-io-logo.png"
+    }
+  },
+  "icons": {
+    "16": "discuss-io-logo.png",
+    "32": "discuss-io-logo.png",
+    "48": "discuss-io-logo.png",
+    "128": "discuss-io-logo.png"
   }
 }

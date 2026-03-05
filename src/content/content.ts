@@ -3,6 +3,10 @@ import { extractRecentMessages, findChatContainer, findChatInput, findVirtualize
 
 const LOG_PREFIX = '[ContentScript]'
 const DEV_MODE = import.meta.env.DEV
+const MAX_CAPTURE_SCAN = 200
+const DEEP_FETCH_MAX_STEPS = 60
+const DEEP_FETCH_STEP_MS = 140
+const DEEP_FETCH_STAGNANT_LIMIT = 3
 
 declare global {
   interface Window {
@@ -20,6 +24,12 @@ function likelyBigBlueButtonPage(): boolean {
   const url = window.location.href.toLowerCase()
   const title = document.title.toLowerCase()
   return url.includes('bigbluebutton') || url.includes('html5client') || title.includes('bigbluebutton')
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms)
+  })
 }
 
 function setInputValue(input: HTMLTextAreaElement | HTMLInputElement, value: string): void {
@@ -93,7 +103,19 @@ function autofillText(text: string, submit = false): AutofillTextResult {
   return { success: true }
 }
 
-function buildRecentMessagesResult(limit: number): RecentMessagesResult {
+function collectVisibleMessages(captureLimit = MAX_CAPTURE_SCAN): Map<string, ReturnType<typeof extractRecentMessages>[number]> {
+  const map = new Map<string, ReturnType<typeof extractRecentMessages>[number]>()
+  const visibleMessages = extractRecentMessages(document, captureLimit)
+  visibleMessages.forEach((message) => {
+    const key = `${message.studentIndex ?? ''}|${message.username}|${message.text}|${message.timestamp}`
+    if (!map.has(key)) {
+      map.set(key, message)
+    }
+  })
+  return map
+}
+
+async function buildRecentMessagesResult(limit: number, deepFetch: boolean): Promise<RecentMessagesResult> {
   const container = findChatContainer(document)
   if (!container) {
     log('FETCH_RECENT_MESSAGES failed: chat container not found')
@@ -114,8 +136,52 @@ function buildRecentMessagesResult(limit: number): RecentMessagesResult {
     }
   }
 
-  const messages = extractRecentMessages(document, limit)
-  log(`FETCH_RECENT_MESSAGES parsed ${messages.length} messages (limit=${limit})`)
+  const dedup = collectVisibleMessages()
+
+  if (deepFetch) {
+    const scrollTarget = container instanceof HTMLElement ? container : (innerContainer as HTMLElement)
+    const originalScrollTop = scrollTarget.scrollTop
+    log('Deep fetch using scroll target:', scrollTarget.className || scrollTarget.tagName)
+    let stagnantSteps = 0
+    let previousMessageCount = dedup.size
+
+    for (let step = 0; step < DEEP_FETCH_MAX_STEPS; step += 1) {
+      const previousTop = scrollTarget.scrollTop
+      const scrollDelta = Math.max(80, Math.floor(scrollTarget.clientHeight * 0.8))
+      scrollTarget.scrollTop = Math.max(0, previousTop - scrollDelta)
+      scrollTarget.dispatchEvent(new Event('scroll', { bubbles: true }))
+      container.dispatchEvent(new Event('scroll', { bubbles: true }))
+
+      await sleep(DEEP_FETCH_STEP_MS)
+
+      const snapshot = collectVisibleMessages()
+      snapshot.forEach((value, key) => {
+        if (!dedup.has(key)) {
+          dedup.set(key, value)
+        }
+      })
+
+      const nowTop = scrollTarget.scrollTop
+      if (dedup.size === previousMessageCount || nowTop === previousTop) {
+        stagnantSteps += 1
+      } else {
+        stagnantSteps = 0
+      }
+
+      previousMessageCount = dedup.size
+      if (nowTop <= 0 && stagnantSteps >= DEEP_FETCH_STAGNANT_LIMIT) {
+        break
+      }
+    }
+
+    scrollTarget.scrollTop = originalScrollTop
+    scrollTarget.dispatchEvent(new Event('scroll', { bubbles: true }))
+    container.dispatchEvent(new Event('scroll', { bubbles: true }))
+  }
+
+  const sorted = Array.from(dedup.values()).sort((a, b) => a.timestamp - b.timestamp)
+  const messages = sorted.slice(Math.max(0, sorted.length - limit))
+  log(`FETCH_RECENT_MESSAGES parsed ${messages.length} messages (limit=${limit}, deepFetch=${deepFetch})`)
   return {
     messages,
     capturedAt: Date.now(),
@@ -131,10 +197,10 @@ function isAutofillMessage(message: RuntimeMessage): message is RuntimeMessage<'
   return message.type === MESSAGE_TYPES.AUTOFILL_TEXT
 }
 
-function handleRuntimeMessage(
+async function handleRuntimeMessage(
   message: unknown,
   sendResponse: (response?: RuntimeMessage<'RECENT_MESSAGES_RESULT'> | AutofillTextResult) => void,
-): void {
+): Promise<void> {
   if (!message || typeof message !== 'object') {
     sendResponse(undefined)
     return
@@ -144,7 +210,7 @@ function handleRuntimeMessage(
 
   if (isFetchRecentMessage(typed)) {
     const limit = Math.max(1, Math.min(200, typed.payload.limit))
-    const payload = buildRecentMessagesResult(limit)
+    const payload = await buildRecentMessagesResult(limit, typed.payload.deepFetch === true)
     if (payload.error) {
       log(`FETCH_RECENT_MESSAGES returning error: ${payload.error}`)
     }
@@ -175,7 +241,7 @@ function bootstrap(): void {
   window.__discussionAssistantInitialized = true
 
   chrome.runtime.onMessage.addListener((message: unknown, _sender: unknown, sendResponse: (response?: unknown) => void) => {
-    handleRuntimeMessage(message, sendResponse as (response?: RuntimeMessage<'RECENT_MESSAGES_RESULT'> | AutofillTextResult) => void)
+    void handleRuntimeMessage(message, sendResponse as (response?: RuntimeMessage<'RECENT_MESSAGES_RESULT'> | AutofillTextResult) => void)
     return true
   })
 

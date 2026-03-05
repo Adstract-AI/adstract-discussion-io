@@ -1,15 +1,19 @@
 import {
   MESSAGE_TYPES,
+  type AiModel,
+  type AgentLanguage,
   type AutofillTextResult,
   type ChatMessage,
   type DiscussionRecord,
   type DiscussionAnalysisResult,
   type ParticipationResult,
   type PopupViewState,
+  type PromptSemantics,
   type RuntimeMessage,
   type StoredData,
 } from '../types/chat'
 import { generateParticipationText, generateSimilarQuestion, inferQuestionFromResponses } from './summarizer'
+import { DEFAULT_PROMPT_SEMANTICS } from './prompts/systemPrompt'
 import {
   appendDiscussion,
   deleteSession,
@@ -31,10 +35,25 @@ const MAX_DEBUG_LOGS = 30
 const STATE_STORAGE_KEY = 'discussionAssistantManualState'
 const OPENAI_API_KEY_STORAGE_KEY = 'discussionAssistantOpenAIApiKey'
 const CONTEXT_WINDOW_STORAGE_KEY = 'discussionAssistantContextWindow'
+const AI_CONFIG_STORAGE_KEY = 'discussionAssistantAiConfigV1'
 const ALLOWED_BBB_HOSTS = new Set([
   'bbb-23.finki.ukim.mk',
   'bbb-24.finki.ukim.mk',
 ])
+const ALLOWED_AI_MODELS: readonly AiModel[] = ['gpt-5.2', 'gpt-5.3-chat-latest', 'gpt-5-mini', 'gpt-5-nano']
+const ALLOWED_LANGUAGES: readonly AgentLanguage[] = ['English', 'Macedonian']
+
+interface AiConfig {
+  model: AiModel
+  language: AgentLanguage
+  prompts: PromptSemantics
+}
+
+const DEFAULT_AI_CONFIG: AiConfig = {
+  model: 'gpt-5-mini',
+  language: 'Macedonian',
+  prompts: DEFAULT_PROMPT_SEMANTICS,
+}
 
 let popupState: PopupViewState = {
   isAnalyzing: false,
@@ -174,6 +193,52 @@ async function saveContextWindow(contextWindow: number): Promise<void> {
   })
 }
 
+function sanitizePromptSemantics(input: unknown): PromptSemantics {
+  const source = (input && typeof input === 'object') ? input as Partial<PromptSemantics> : {}
+  const normalize = (value: unknown, fallback: string): string => {
+    const trimmed = typeof value === 'string' ? value.trim() : ''
+    return trimmed || fallback
+  }
+  return {
+    general: normalize(source.general, DEFAULT_PROMPT_SEMANTICS.general),
+    inferQuestion: normalize(source.inferQuestion, DEFAULT_PROMPT_SEMANTICS.inferQuestion),
+    participation: normalize(source.participation, DEFAULT_PROMPT_SEMANTICS.participation),
+    similarQuestion: normalize(source.similarQuestion, DEFAULT_PROMPT_SEMANTICS.similarQuestion),
+  }
+}
+
+function sanitizeAiConfig(input: unknown): AiConfig {
+  const source = (input && typeof input === 'object') ? input as Partial<AiConfig> : {}
+  const model = ALLOWED_AI_MODELS.includes(source.model as AiModel)
+    ? (source.model as AiModel)
+    : DEFAULT_AI_CONFIG.model
+  const language = ALLOWED_LANGUAGES.includes(source.language as AgentLanguage)
+    ? (source.language as AgentLanguage)
+    : DEFAULT_AI_CONFIG.language
+  return {
+    model,
+    language,
+    prompts: sanitizePromptSemantics(source.prompts),
+  }
+}
+
+async function loadAiConfig(): Promise<AiConfig> {
+  try {
+    const result = await chrome.storage.local.get(AI_CONFIG_STORAGE_KEY)
+    return sanitizeAiConfig(result[AI_CONFIG_STORAGE_KEY])
+  } catch {
+    return DEFAULT_AI_CONFIG
+  }
+}
+
+async function saveAiConfig(config: AiConfig): Promise<AiConfig> {
+  const sanitized = sanitizeAiConfig(config)
+  await chrome.storage.local.set({
+    [AI_CONFIG_STORAGE_KEY]: sanitized,
+  })
+  return sanitized
+}
+
 async function restoreState(): Promise<void> {
   const restored = await safeStorageGet<PopupViewState>(STATE_STORAGE_KEY)
   if (restored) {
@@ -288,6 +353,7 @@ async function fetchRecentMessages(tabId: number, limit: number): Promise<ChatMe
       type: MESSAGE_TYPES.FETCH_RECENT_MESSAGES,
       payload: {
         limit,
+        deepFetch: true,
       },
     } satisfies RuntimeMessage<'FETCH_RECENT_MESSAGES'>)
   } catch (error) {
@@ -299,7 +365,7 @@ async function fetchRecentMessages(tabId: number, limit: number): Promise<ChatMe
     }
 
     addDebugLog('Using direct scripting fallback for message fetch.')
-    return fetchRecentMessagesViaScripting(tabId, limit)
+    return fetchRecentMessagesViaScripting(tabId, limit, true)
   }
 
   const typed = response as RuntimeMessage<'RECENT_MESSAGES_RESULT'> | undefined
@@ -345,11 +411,12 @@ async function autofillToChat(tabId: number, text: string, submit = false): Prom
   }
 }
 
-async function fetchRecentMessagesViaScripting(tabId: number, limit: number): Promise<ChatMessage[]> {
+async function fetchRecentMessagesViaScripting(tabId: number, limit: number, deepFetch: boolean): Promise<ChatMessage[]> {
   const execution = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (fetchLimit: number) => {
+    func: async (fetchLimit: number, shouldDeepFetch: boolean) => {
       const normalizeText = (value: string): string => value.replace(/\s+/g, ' ').trim()
+      const wait = (ms: number): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, ms))
       const selectors = [
         '.ReactVirtualized__Grid.ReactVirtualized__List[class*="messageList--"]',
         '[data-testid="chatMessages"]',
@@ -365,58 +432,101 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number): Pr
         return { messages: [], error: 'Virtualized inner chat container not found.' }
       }
 
-      const nodes = Array.from(inner.querySelectorAll(':scope > span > div[class*="item--"]'))
-      const messages: Array<{
+      const parseVisibleMessages = (): Array<{
         id: string
         username: string
         studentIndex?: string
         text: string
         timestamp: number
         rawTimestamp?: string
-      }> = []
+      }> => {
+        const nodes = Array.from(inner.querySelectorAll(':scope > span > div[class*="item--"]'))
+        const messages: Array<{
+          id: string
+          username: string
+          studentIndex?: string
+          text: string
+          timestamp: number
+          rawTimestamp?: string
+        }> = []
+        nodes.forEach((node, index) => {
+          const username =
+            normalizeText(node.querySelector('[class*="name--"]')?.textContent ?? '') || 'Unknown'
+          const studentIndexMatch = username.match(/\((\d+)\)/)
+          const studentIndex = studentIndexMatch?.[1]
+          const text =
+            normalizeText(node.querySelector('p[data-test="chatUserMessageText"]')?.textContent ?? '') ||
+            normalizeText(node.textContent ?? '')
+          const timeEl = node.querySelector('time[class*="time--"], time')
+          const rawTimestamp =
+            normalizeText((timeEl as HTMLTimeElement | null)?.dateTime ?? '') ||
+            normalizeText(timeEl?.getAttribute('datetime') ?? '') ||
+            normalizeText(timeEl?.textContent ?? '')
+          const parsedTimestamp = Date.parse(rawTimestamp)
+          const timestamp = Number.isNaN(parsedTimestamp) ? Date.now() : parsedTimestamp
 
-      nodes.forEach((node, index) => {
-        const username =
-          normalizeText(node.querySelector('[class*="name--"]')?.textContent ?? '') || 'Unknown'
-        const studentIndexMatch = username.match(/\((\d+)\)/)
-        const studentIndex = studentIndexMatch?.[1]
-        const text =
-          normalizeText(node.querySelector('p[data-test="chatUserMessageText"]')?.textContent ?? '') ||
-          normalizeText(node.textContent ?? '')
-        const timeEl = node.querySelector('time[class*="time--"], time')
-        const rawTimestamp =
-          normalizeText((timeEl as HTMLTimeElement | null)?.dateTime ?? '') ||
-          normalizeText(timeEl?.getAttribute('datetime') ?? '') ||
-          normalizeText(timeEl?.textContent ?? '')
-        const parsedTimestamp = Date.parse(rawTimestamp)
-        const timestamp = Number.isNaN(parsedTimestamp) ? Date.now() : parsedTimestamp
+          if (!text || !studentIndex) {
+            return
+          }
 
-        if (!text || !studentIndex) {
-          return
-        }
-
-        messages.push({
-          id: `fallback-${index}-${timestamp}`,
-          username,
-          studentIndex,
-          text,
-          timestamp,
-          rawTimestamp: rawTimestamp || undefined,
+          messages.push({
+            id: `fallback-${index}-${timestamp}`,
+            username,
+            studentIndex,
+            text,
+            timestamp,
+            rawTimestamp: rawTimestamp || undefined,
+          })
         })
-      })
+        return messages
+      }
 
-      const dedup = new Map<string, typeof messages[number]>()
-      messages.forEach((m) => {
-        const key = `${m.username}|${m.text}|${m.timestamp}`
-        if (!dedup.has(key)) {
-          dedup.set(key, m)
+      const dedup = new Map<string, ReturnType<typeof parseVisibleMessages>[number]>()
+      const collect = (): void => {
+        const messages = parseVisibleMessages()
+        messages.forEach((m) => {
+          const key = `${m.studentIndex ?? ''}|${m.username}|${m.text}|${m.timestamp}`
+          if (!dedup.has(key)) {
+            dedup.set(key, m)
+          }
+        })
+      }
+
+      collect()
+
+      if (shouldDeepFetch) {
+        const scrollTarget = container instanceof HTMLElement ? container : (inner as HTMLElement)
+        const originalScrollTop = scrollTarget.scrollTop
+        let stagnantSteps = 0
+        let previousCount = dedup.size
+        for (let step = 0; step < 60; step += 1) {
+          const previousTop = scrollTarget.scrollTop
+          const scrollDelta = Math.max(80, Math.floor(scrollTarget.clientHeight * 0.8))
+          scrollTarget.scrollTop = Math.max(0, previousTop - scrollDelta)
+          scrollTarget.dispatchEvent(new Event('scroll', { bubbles: true }))
+          container.dispatchEvent(new Event('scroll', { bubbles: true }))
+          await wait(140)
+          collect()
+          const nowTop = scrollTarget.scrollTop
+          if (dedup.size === previousCount || nowTop === previousTop) {
+            stagnantSteps += 1
+          } else {
+            stagnantSteps = 0
+          }
+          previousCount = dedup.size
+          if (nowTop <= 0 && stagnantSteps >= 3) {
+            break
+          }
         }
-      })
+        scrollTarget.scrollTop = originalScrollTop
+        scrollTarget.dispatchEvent(new Event('scroll', { bubbles: true }))
+        container.dispatchEvent(new Event('scroll', { bubbles: true }))
+      }
 
       const sorted = Array.from(dedup.values()).sort((a, b) => a.timestamp - b.timestamp)
       return { messages: sorted.slice(Math.max(0, sorted.length - fetchLimit)) }
     },
-    args: [limit],
+    args: [limit, deepFetch],
   })
 
   const result = execution[0]?.result as { messages?: ChatMessage[]; error?: string } | undefined
@@ -535,7 +645,8 @@ async function handleAnalyzeDiscussion(messageWindow: number): Promise<Discussio
     }
 
     const recentMessages = await fetchRecentMessages(tabId, messageWindow)
-    const inferredQuestion = await inferQuestionFromResponses(recentMessages, apiKey)
+    const aiConfig = await loadAiConfig()
+    const inferredQuestion = await inferQuestionFromResponses(recentMessages, apiKey, aiConfig)
 
     const analysis: DiscussionAnalysisResult = {
       inferredQuestion,
@@ -615,7 +726,8 @@ async function handleAnalyzeFromContext(
     if (!apiKey) {
       throw new Error('OpenAI API key is missing. Add it in Settings.')
     }
-    const inferredQuestion = await inferQuestionFromResponses(contextMessages, apiKey)
+    const aiConfig = await loadAiConfig()
+    const inferredQuestion = await inferQuestionFromResponses(contextMessages, apiKey, aiConfig)
     const analysis: DiscussionAnalysisResult = {
       inferredQuestion,
       contextMessages,
@@ -736,10 +848,12 @@ async function handleGenerateParticipation(
     }
 
     const boundedContext = sliceContextMessages(contextMessages)
+    const aiConfig = await loadAiConfig()
     const generatedText = await generateParticipationText(
       inferredQuestion,
       boundedContext,
       apiKey,
+      aiConfig,
       previousSuggestions,
       previousParticipations,
     )
@@ -876,6 +990,10 @@ function isSettingsSetApiKey(message: RuntimeMessage): message is RuntimeMessage
 
 function isSettingsSetContextWindow(message: RuntimeMessage): message is RuntimeMessage<'SETTINGS_SET_CONTEXT_WINDOW'> {
   return message.type === MESSAGE_TYPES.SETTINGS_SET_CONTEXT_WINDOW
+}
+
+function isSettingsSetAiConfig(message: RuntimeMessage): message is RuntimeMessage<'SETTINGS_SET_AI_CONFIG'> {
+  return message.type === MESSAGE_TYPES.SETTINGS_SET_AI_CONFIG
 }
 
 function isSessionDeleteMessage(message: RuntimeMessage): message is RuntimeMessage<'SESSION_DELETE'> {
@@ -1081,10 +1199,14 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
   if (message.type === MESSAGE_TYPES.SETTINGS_GET) {
     const apiKey = await loadOpenAiApiKey()
     const contextWindow = await loadContextWindow()
+    const aiConfig = await loadAiConfig()
     return {
       apiKey: apiKey ?? '',
       hasApiKey: Boolean(apiKey),
       contextWindow,
+      aiModel: aiConfig.model,
+      aiLanguage: aiConfig.language,
+      promptSemantics: aiConfig.prompts,
     }
   }
 
@@ -1104,6 +1226,26 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
       await saveContextWindow(message.payload.contextWindow)
       const contextWindow = await loadContextWindow()
       return { success: true, contextWindow }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  if (isSettingsSetAiConfig(message)) {
+    try {
+      const saved = await saveAiConfig({
+        model: message.payload.model,
+        language: message.payload.language,
+        prompts: message.payload.prompts,
+      })
+      return {
+        success: true,
+        aiModel: saved.model,
+        aiLanguage: saved.language,
+        promptSemantics: saved.prompts,
+      }
     } catch (error) {
       return {
         error: error instanceof Error ? error.message : String(error),
@@ -1188,11 +1330,13 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
       if (!apiKey) {
         throw new Error('OpenAI API key is missing. Add it in Settings.')
       }
+      const aiConfig = await loadAiConfig()
 
       const similarQuestion = await generateSimilarQuestion(
         question,
         context,
         apiKey,
+        aiConfig,
         previousQuestions,
         previousParticipations,
       )

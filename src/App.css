@@ -81,6 +81,23 @@
   color: #f9fafb;
 }
 
+.title-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.title-logo {
+  width: 30px;
+  height: 30px;
+  object-fit: contain;
+  display: block;
+}
+
+.title-text {
+  display: inline-block;
+}
+
 .title-home-btn {
   border: none;
   background: transparent;
@@ -821,10 +838,19 @@
   left: 50%;
   bottom: 14px;
   transform: translateX(-50%);
+  border: none;
+  background: transparent;
   color: #6b7280;
   font-size: 11px;
   letter-spacing: 0.02em;
   margin: 0;
+  width: auto;
+  padding: 0;
+  cursor: pointer;
+}
+
+.session-gate-footer:hover {
+  color: #94a3b8;
 }
 
 .how-it-works-card {
@@ -1352,12 +1378,47 @@ textarea:disabled {
   max-height: min(520px, calc(100vh - 36px));
 }
 
+.modal-card.discussion-context-modal {
+  width: min(860px, calc(100% - 12px));
+  max-height: min(760px, calc(100vh - 20px));
+}
+
 .modal-card.terms-modal {
   width: min(760px, calc(100% - 24px));
   max-height: min(560px, calc(100vh - 36px));
   display: grid;
   grid-template-rows: auto 1fr auto;
   overflow: hidden;
+}
+
+.modal-card.about-modal {
+  width: min(680px, calc(100% - 24px));
+  max-height: min(560px, calc(100vh - 36px));
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  overflow: hidden;
+}
+
+.modal-card.how-it-works-modal {
+  width: min(820px, calc(100% - 24px));
+  max-height: min(640px, calc(100vh - 36px));
+  display: grid;
+  grid-template-rows: auto 1fr;
+  overflow: hidden;
+}
+
+.about-logo-wrap {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.about-logo {
+  width: 150px;
+  max-width: 70%;
+  height: auto;
+  object-fit: contain;
 }
 
 .terms-content {
@@ -1367,6 +1428,35 @@ textarea:disabled {
   background: #181818;
   border: 1px solid var(--surface-border-subtle);
   overflow: auto;
+}
+
+.legal-tabs {
+  display: inline-flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.legal-tab {
+  width: auto;
+  margin: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: 8px;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.legal-tab:hover {
+  background: #262626;
+  color: #cbd5e1;
+}
+
+.legal-tab.active {
+  background: #1e293b;
+  color: #bfdbfe;
+  border-color: transparent;
 }
 
 .terms-markdown {
@@ -1407,8 +1497,21 @@ textarea:disabled {
 .terms-actions {
   margin-top: 10px;
   display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.terms-actions .muted {
+  margin-right: auto;
+}
+
+.terms-actions-buttons {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
 }
 
 .terms-actions .ghost-btn,
@@ -1487,6 +1590,22 @@ textarea:disabled {
   background: #262626;
   color: #e2e8f0;
   font-size: 12px;
+}
+
+.settings-field select,
+.settings-field textarea {
+  width: 100%;
+  border: 1px solid var(--surface-border-subtle);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: #262626;
+  color: #e2e8f0;
+  font-size: 12px;
+}
+
+.settings-field textarea {
+  min-height: 66px;
+  resize: vertical;
 }
 
 .settings-danger-btn {
