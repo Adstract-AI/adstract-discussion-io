@@ -1282,7 +1282,7 @@ export default function Popup() {
   const popupClassName = [
     'popup-root',
     unsupportedOnlyView ? 'unsupported' : '',
-    state.sessionRequired && !unsupportedOnlyView && !showOldSessions && !showHowItWorks ? 'compact' : '',
+    isWelcomeScreen ? 'welcome-mode' : '',
   ].filter(Boolean).join(' ')
 
   return (
@@ -1409,7 +1409,7 @@ export default function Popup() {
       ) : (
         <>
           {(!showDebugView || viewMode === 'assistant') ? (
-            <section className={`stack ${isWelcomeScreen ? 'welcome-stack' : ''}`}>
+            <section className={isWelcomeScreen ? 'welcome-fullscreen' : 'stack'}>
               {state.sessionRequired ? (
                 showHowItWorks ? (
                   <section className="card how-it-works-card">
@@ -1573,51 +1573,55 @@ export default function Popup() {
                     </section>
                   </section>
                 ) : (
-                  <section className="card session-gate">
-                    <h2>Welcome</h2>
-                    <p className="session-gate-description">
-                      Discussion.IO helps you participate in live class discussions with less friction.
-                      Capture recent chat context, infer the professor question, and draft strong responses fast.
-                      You can submit your own message, request multiple suggestions, or continue a previous discussion.
-                    </p>
-                    <div className="session-gate-actions-icon">
-                      <div className="session-gate-option">
+                  <section className="welcome-shell">
+                    <section className="card session-gate">
+                      <div className="session-gate-body">
+                        <h2>Welcome</h2>
+                        <p className="session-gate-description">
+                          Discussion.IO helps you participate in live class discussions with less friction.
+                          Capture recent chat context, infer the professor question, and draft strong responses fast.
+                          You can submit your own message, request multiple suggestions, or continue a previous discussion.
+                        </p>
+                        <div className="session-gate-actions-icon">
+                          <div className="session-gate-option">
+                            <button
+                              className="session-gate-icon-btn custom-tooltip-trigger"
+                              data-tooltip="Create New Session"
+                              aria-label="Create New Session"
+                              onClick={onStartSession}
+                              type="button"
+                            >
+                              <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                              </svg>
+                            </button>
+                            <small>New Session</small>
+                          </div>
+                          <div className="session-gate-option">
+                            <button
+                              className="session-gate-icon-btn custom-tooltip-trigger"
+                              data-tooltip="View Old Sessions"
+                              aria-label="View Old Sessions"
+                              onClick={onViewOldSessions}
+                              type="button"
+                            >
+                              <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                <path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                              </svg>
+                            </button>
+                            <small>Old Sessions</small>
+                          </div>
+                        </div>
                         <button
-                          className="session-gate-icon-btn custom-tooltip-trigger"
-                          data-tooltip="Create New Session"
-                          aria-label="Create New Session"
-                          onClick={onStartSession}
+                          className="mini-btn session-gate-docs-btn"
+                          onClick={onOpenHowItWorks}
                           type="button"
                         >
-                          <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                          </svg>
+                          How It Works
                         </button>
-                        <small>New Session</small>
                       </div>
-                      <div className="session-gate-option">
-                        <button
-                          className="session-gate-icon-btn custom-tooltip-trigger"
-                          data-tooltip="View Old Sessions"
-                          aria-label="View Old Sessions"
-                          onClick={onViewOldSessions}
-                          type="button"
-                        >
-                          <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                          </svg>
-                        </button>
-                        <small>Old Sessions</small>
-                      </div>
-                    </div>
-                    <button
-                      className="mini-btn session-gate-docs-btn"
-                      onClick={onOpenHowItWorks}
-                      type="button"
-                    >
-                      How It Works
-                    </button>
-                    <small className="session-gate-footer">Adstarct 2026 ©</small>
+                      <small className="session-gate-footer">Adstract 2026 ©</small>
+                    </section>
                   </section>
                 )
               ) : (
