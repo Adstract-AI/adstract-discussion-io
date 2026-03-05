@@ -143,7 +143,7 @@ function handleRuntimeMessage(
   const typed = message as RuntimeMessage
 
   if (isFetchRecentMessage(typed)) {
-    const limit = Math.max(1, Math.min(100, typed.payload.limit))
+    const limit = Math.max(1, Math.min(200, typed.payload.limit))
     const payload = buildRecentMessagesResult(limit)
     if (payload.error) {
       log(`FETCH_RECENT_MESSAGES returning error: ${payload.error}`)

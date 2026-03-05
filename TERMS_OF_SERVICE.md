@@ -1,6 +1,6 @@
 # Terms of Service
 
-Last Updated: [DATE]
+Last Updated: March 5, 2026
 
 These Terms of Service ("Terms") govern the use of the **Adstract Discussion Assistant** Chrome extension ("Extension", "Tool", "Service"). By installing, accessing, or using this Extension, you agree to be bound by these Terms.
 

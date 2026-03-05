@@ -161,14 +161,14 @@ async function loadContextWindow(): Promise<number> {
     if (!Number.isFinite(numeric)) {
       return DEFAULT_CONTEXT_WINDOW
     }
-    return Math.max(5, Math.min(200, Math.round(numeric)))
+    return Math.max(1, Math.min(200, Math.round(numeric)))
   } catch {
     return DEFAULT_CONTEXT_WINDOW
   }
 }
 
 async function saveContextWindow(contextWindow: number): Promise<void> {
-  const bounded = Math.max(5, Math.min(200, Math.round(contextWindow)))
+  const bounded = Math.max(1, Math.min(200, Math.round(contextWindow)))
   await chrome.storage.local.set({
     [CONTEXT_WINDOW_STORAGE_KEY]: bounded,
   })
@@ -1113,7 +1113,7 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
 
   if (isAnalyzeMessage(message)) {
     try {
-      const limit = Math.max(1, Math.min(100, message.payload.messageWindow || DEFAULT_MESSAGE_WINDOW))
+      const limit = Math.max(1, Math.min(200, message.payload.messageWindow || DEFAULT_MESSAGE_WINDOW))
       const analysis = await handleAnalyzeDiscussion(limit)
       return analysis
     } catch (error) {
@@ -1125,7 +1125,7 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
 
   if (isAnalyzeFromContext(message)) {
     try {
-      const limit = Math.max(1, Math.min(100, message.payload.messageWindow || DEFAULT_MESSAGE_WINDOW))
+      const limit = Math.max(1, Math.min(200, message.payload.messageWindow || DEFAULT_MESSAGE_WINDOW))
       const analysis = await handleAnalyzeFromContext(
         limit,
         message.payload.capturedAt || Date.now(),
@@ -1256,7 +1256,7 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
 
   if (isDebugGetMessages(message)) {
     try {
-      const limit = Math.max(1, Math.min(100, message.payload.limit || DEFAULT_DEBUG_WINDOW))
+      const limit = Math.max(1, Math.min(200, message.payload.limit || DEFAULT_DEBUG_WINDOW))
       const messages = await handleDebugGetMessages(limit)
       return {
         messages,

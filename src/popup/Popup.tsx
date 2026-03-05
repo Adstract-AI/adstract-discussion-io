@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
 import {
   type DiscussionRecord,
   MESSAGE_TYPES,
@@ -7,14 +7,21 @@ import {
   type RuntimeMessage,
   type SessionRecord,
 } from '../types/chat'
+import TERMS_OF_SERVICE_TEXT from '../../TERMS_OF_SERVICE.md?raw'
 
 const DEFAULT_MESSAGE_WINDOW = 20
 const DEV_MOCK_BASE = Date.now() - 1000 * 60 * 60
 const POPUP_UI_STATE_KEY = 'discussionAssistantPopupUiStateV1'
+const TERMS_ACCEPTED_KEY = 'discussionAssistantTermsAcceptedV1'
 
 type ViewMode = 'assistant' | 'debug'
 type AssistantFlowStage = 'idle' | 'collecting' | 'collected' | 'awaiting-analysis' | 'participating' | 'awaiting-suggestion' | 'awaiting-similar-question'
 type SettingsTab = 'sessions' | 'ai' | 'context'
+type PendingTermsAction =
+  | { type: 'start' }
+  | { type: 'restore'; sessionId: string }
+  | { type: 'restart' }
+  | null
 
 interface PopupUiStateCache {
   flowStage: AssistantFlowStage
@@ -145,6 +152,93 @@ function formatTimeOnly(timestamp?: number): string {
   })
 }
 
+function renderInlineMarkdown(text: string): ReactNode[] {
+  const parts = text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean)
+  return parts.map((part, index) => {
+    if (part.startsWith('**') && part.endsWith('**')) {
+      return <strong key={`md-strong-${index}`}>{part.slice(2, -2)}</strong>
+    }
+    return <span key={`md-span-${index}`}>{part}</span>
+  })
+}
+
+function renderTermsMarkdown(markdown: string): ReactNode[] {
+  const lines = markdown.split(/\r?\n/)
+  const nodes: ReactNode[] = []
+  let listItems: string[] = []
+  let paragraphBuffer: string[] = []
+
+  const flushList = (): void => {
+    if (listItems.length === 0) {
+      return
+    }
+    nodes.push(
+      <ul key={`list-${nodes.length}`} className="terms-list">
+        {listItems.map((item, index) => (
+          <li key={`li-${nodes.length}-${index}`}>{renderInlineMarkdown(item)}</li>
+        ))}
+      </ul>,
+    )
+    listItems = []
+  }
+
+  const flushParagraph = (): void => {
+    if (paragraphBuffer.length === 0) {
+      return
+    }
+    nodes.push(
+      <p key={`p-${nodes.length}`} className="terms-paragraph">
+        {renderInlineMarkdown(paragraphBuffer.join(' '))}
+      </p>,
+    )
+    paragraphBuffer = []
+  }
+
+  lines.forEach((rawLine) => {
+    const line = rawLine.trim()
+    if (!line) {
+      flushList()
+      flushParagraph()
+      return
+    }
+
+    if (line === '---') {
+      flushList()
+      flushParagraph()
+      nodes.push(<hr key={`hr-${nodes.length}`} className="terms-separator" />)
+      return
+    }
+
+    if (line.startsWith('# ')) {
+      flushList()
+      flushParagraph()
+      nodes.push(<h1 key={`h1-${nodes.length}`}>{renderInlineMarkdown(line.slice(2).trim())}</h1>)
+      return
+    }
+
+    if (line.startsWith('## ')) {
+      flushList()
+      flushParagraph()
+      nodes.push(<h2 key={`h2-${nodes.length}`}>{renderInlineMarkdown(line.slice(3).trim())}</h2>)
+      return
+    }
+
+    if (line.startsWith('- ')) {
+      flushParagraph()
+      listItems.push(line.slice(2).trim())
+      return
+    }
+
+    flushList()
+    paragraphBuffer.push(line)
+  })
+
+  flushList()
+  flushParagraph()
+
+  return nodes
+}
+
 function formatDateOnly(timestamp?: number): string {
   if (!timestamp) {
     return 'N/A'
@@ -251,6 +345,9 @@ export default function Popup() {
   const [showHowItWorks, setShowHowItWorks] = useState(false)
   const [sessionSidebarCollapsed, setSessionSidebarCollapsed] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
+  const [showTermsModal, setShowTermsModal] = useState(false)
+  const [hasAcceptedTerms, setHasAcceptedTerms] = useState(false)
+  const [pendingTermsAction, setPendingTermsAction] = useState<PendingTermsAction>(null)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('sessions')
   const [settingsApiKey, setSettingsApiKey] = useState('')
   const [settingsHasApiKey, setSettingsHasApiKey] = useState(false)
@@ -449,10 +546,21 @@ export default function Popup() {
         setSettingsApiKey(typed?.apiKey ?? '')
         setSettingsHasApiKey(Boolean(typed?.hasApiKey))
         if (typed?.contextWindow && Number.isFinite(typed.contextWindow)) {
-          const bounded = Math.max(5, Math.min(200, Math.round(typed.contextWindow)))
+          const bounded = Math.max(1, Math.min(200, Math.round(typed.contextWindow)))
           setContextWindow(bounded)
           setSettingsContextWindow(bounded)
         }
+      })
+  }, [])
+
+  useEffect(() => {
+    void chrome.storage.local.get(TERMS_ACCEPTED_KEY)
+      .then((raw: Record<string, unknown>) => {
+        const value = raw[TERMS_ACCEPTED_KEY]
+        setHasAcceptedTerms(Boolean(value && (value as { accepted?: boolean }).accepted))
+      })
+      .catch(() => {
+        setHasAcceptedTerms(false)
       })
   }, [])
 
@@ -712,7 +820,16 @@ export default function Popup() {
     setFlowStage('participating')
   }
 
-  const onStartSession = (): void => {
+  const requireTermsAcceptance = (action: PendingTermsAction): boolean => {
+    if (hasAcceptedTerms) {
+      return false
+    }
+    setPendingTermsAction(action)
+    setShowTermsModal(true)
+    return true
+  }
+
+  const startSessionInternal = (): void => {
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.SESSION_START,
     }).then((response: unknown) => {
@@ -724,6 +841,13 @@ export default function Popup() {
       setShowHowItWorks(false)
       refreshSessionList()
     })
+  }
+
+  const onStartSession = (): void => {
+    if (requireTermsAcceptance({ type: 'start' })) {
+      return
+    }
+    startSessionInternal()
   }
 
   const onEndSession = (): void => {
@@ -740,7 +864,7 @@ export default function Popup() {
     window.close()
   }
 
-  const onRestartSession = (): void => {
+  const restartSessionInternal = (): void => {
     const restart = async (): Promise<void> => {
       if (!state.sessionRequired) {
         await chrome.runtime.sendMessage({
@@ -756,6 +880,13 @@ export default function Popup() {
     }
 
     void restart()
+  }
+
+  const onRestartSession = (): void => {
+    if (requireTermsAcceptance({ type: 'restart' })) {
+      return
+    }
+    restartSessionInternal()
   }
 
   const onParticipate = (): void => {
@@ -1097,12 +1228,7 @@ export default function Popup() {
     })
   }
 
-  const onRestoreSessionConfirm = (): void => {
-    if (!sessionActionTarget) {
-      return
-    }
-
-    const restoreId = sessionActionTarget.id
+  const restoreSessionInternal = (restoreId: string): void => {
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.SESSION_RESTORE,
       payload: {
@@ -1123,6 +1249,56 @@ export default function Popup() {
       const text = error instanceof Error ? error.message : String(error)
       setDebugActionStatus(`Restore failed: ${text}`)
     })
+  }
+
+  const onRestoreSessionConfirm = (): void => {
+    if (!sessionActionTarget) {
+      return
+    }
+
+    const restoreId = sessionActionTarget.id
+    if (requireTermsAcceptance({ type: 'restore', sessionId: restoreId })) {
+      return
+    }
+    restoreSessionInternal(restoreId)
+  }
+
+  const onAcceptTerms = (): void => {
+    const pending = pendingTermsAction
+    void chrome.storage.local.set({
+      [TERMS_ACCEPTED_KEY]: {
+        accepted: true,
+        acceptedAt: Date.now(),
+      },
+    }).then(() => {
+      setHasAcceptedTerms(true)
+      setShowTermsModal(false)
+      setPendingTermsAction(null)
+      if (!pending) {
+        return
+      }
+      if (pending.type === 'start') {
+        startSessionInternal()
+        return
+      }
+      if (pending.type === 'restart') {
+        restartSessionInternal()
+        return
+      }
+      if (pending.type === 'restore') {
+        restoreSessionInternal(pending.sessionId)
+      }
+    })
+  }
+
+  const onCloseTermsModal = (): void => {
+    setShowTermsModal(false)
+    setPendingTermsAction(null)
+  }
+
+  const onOpenTerms = (): void => {
+    setPendingTermsAction(null)
+    setShowTermsModal(true)
   }
 
   const onTitleClick = (): void => {
@@ -1194,7 +1370,7 @@ export default function Popup() {
       setSettingsApiKey(typed?.apiKey ?? '')
       setSettingsHasApiKey(Boolean(typed?.hasApiKey))
       if (typed && typeof (typed as { contextWindow?: number }).contextWindow === 'number') {
-        const bounded = Math.max(5, Math.min(200, Math.round((typed as { contextWindow?: number }).contextWindow ?? DEFAULT_MESSAGE_WINDOW)))
+        const bounded = Math.max(1, Math.min(200, Math.round((typed as { contextWindow?: number }).contextWindow ?? DEFAULT_MESSAGE_WINDOW)))
         setSettingsContextWindow(bounded)
         setContextWindow(bounded)
       }
@@ -1245,7 +1421,7 @@ export default function Popup() {
   }
 
   const onSaveContextWindow = (): void => {
-    const bounded = Math.max(5, Math.min(200, Math.round(settingsContextWindow || DEFAULT_MESSAGE_WINDOW)))
+    const bounded = Math.max(1, Math.min(200, Math.round(settingsContextWindow || DEFAULT_MESSAGE_WINDOW)))
     setSettingsStatus('Saving context size...')
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.SETTINGS_SET_CONTEXT_WINDOW,
@@ -1351,6 +1527,19 @@ export default function Popup() {
             aria-label="Open how it works"
           >
             ?
+          </button>
+          <button
+            className="settings-toggle-btn"
+            onClick={onOpenTerms}
+            type="button"
+            title="Terms of Service"
+            aria-label="Open terms of service"
+          >
+            <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M8 3h6l5 5v13H8z" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+              <path d="M14 3v5h5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" />
+              <path d="M11 13h5M11 17h5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
           </button>
           <button
             className="settings-toggle-btn"
@@ -1564,9 +1753,17 @@ export default function Popup() {
                       <section className="chat-island history-only-island">
                         <h2>History Only</h2>
                         <p className="muted">Viewing saved sessions. Start a new session to analyze live chat.</p>
-                        <div className="chat-island-actions">
-                          <button onClick={onStartSession} type="button">
-                            Create New Session
+                        <div className="history-action-row">
+                          <button
+                            className="history-icon-btn custom-tooltip-trigger"
+                            data-tooltip="Create New Session"
+                            aria-label="Create New Session"
+                            onClick={onStartSession}
+                            type="button"
+                          >
+                            <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                              <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                            </svg>
                           </button>
                         </div>
                       </section>
@@ -2087,6 +2284,36 @@ export default function Popup() {
         </div>
       ) : null}
 
+      {showTermsModal ? (
+        <div className="modal-backdrop" onClick={onCloseTermsModal}>
+          <div className="modal-card terms-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="section-header">
+              <h2>Terms of Service</h2>
+              <button className="mini-btn" onClick={onCloseTermsModal} type="button">
+                Close
+              </button>
+            </div>
+            <div className="terms-content">
+              <div className="terms-markdown">
+                {renderTermsMarkdown(TERMS_OF_SERVICE_TEXT)}
+              </div>
+            </div>
+            {pendingTermsAction ? (
+              <div className="terms-actions">
+                <>
+                  <button className="ghost-btn" onClick={onCloseTermsModal} type="button">
+                    Decline
+                  </button>
+                  <button className="terms-accept-btn" onClick={onAcceptTerms} type="button">
+                    Accept Terms
+                  </button>
+                </>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
+
       {showSettings ? (
         <div className="modal-backdrop" onClick={() => setShowSettings(false)}>
           <div className="modal-card settings-modal" onClick={(event) => event.stopPropagation()}>
@@ -2177,7 +2404,7 @@ export default function Popup() {
                       <input
                         id="context-window-size"
                         type="number"
-                        min={5}
+                        min={1}
                         max={200}
                         step={1}
                         value={settingsContextWindow}
