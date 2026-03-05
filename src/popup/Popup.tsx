@@ -1875,12 +1875,20 @@ export default function Popup() {
                   <section className="welcome-shell">
                     <section className="card session-gate">
                       <div className="session-gate-body">
-                        <h2>Welcome</h2>
+                        <div className="session-gate-hero">
+                          <div>
+                            <h1 className="session-gate-title">Discussion.IO</h1>
+                            <p className="session-gate-subtitle">Your in-class discussion assistant</p>
+                          </div>
+                        </div>
                         <p className="session-gate-description">
-                          Discussion.IO helps you participate in live class discussions with less friction.
-                          Capture recent chat context, infer the professor question, and draft strong responses fast.
-                          You can submit your own message, request multiple suggestions, or continue a previous discussion.
+                          Reads the live chat, infers the professor's question, and drafts a strong response — so you can participate with confidence.
                         </p>
+                        {/*<div className="session-gate-pills">*/}
+                        {/*  <span className="session-gate-pill">Context capture</span>*/}
+                        {/*  <span className="session-gate-pill">AI drafts</span>*/}
+                        {/*  <span className="session-gate-pill">Discussion history</span>*/}
+                        {/*</div>*/}
                         <div className="session-gate-actions-icon">
                           <div className="session-gate-option">
                             <button
@@ -1912,7 +1920,7 @@ export default function Popup() {
                           </div>
                         </div>
                         <button
-                          className="mini-btn session-gate-docs-btn"
+                          className="session-gate-docs-link"
                           onClick={onOpenHowItWorks}
                           type="button"
                         >

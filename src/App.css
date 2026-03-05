@@ -764,24 +764,65 @@
   flex-direction: column;
   align-items: center;
   justify-content: flex-start;
-  gap: 10px;
+  gap: 14px;
 }
 
 .session-gate p {
   text-align: center;
 }
 
-.session-gate h2 {
+.session-gate-hero {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 8px;
+  width: 100%;
+  text-align: center;
+}
+
+.session-gate-title {
   margin: 0;
-  font-size: 20px;
-  letter-spacing: -0.01em;
+  font-size: 18px;
+  font-weight: 700;
+  color: #e2e8f0;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.session-gate-subtitle {
+  margin: 2px 0 0;
+  font-size: 11px;
+  color: #6b7280;
+  letter-spacing: 0.02em;
+  text-align: center !important;
 }
 
 .session-gate-description {
-  max-width: 520px;
   text-align: center;
   color: #9ca3af;
+  font-size: 12.5px;
+  line-height: 1.6;
   margin: 0 auto;
+  max-width: 260px;
+}
+
+.session-gate-pills {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+}
+
+.session-gate-pill {
+  font-size: 10.5px;
+  color: #93c5fd;
+  background: #1e3a5f;
+  border: 1px solid #2d5a8e;
+  border-radius: 6px;
+  padding: 3px 10px;
+  letter-spacing: 0.01em;
 }
 
 .session-gate-actions-icon {
@@ -789,7 +830,7 @@
   align-items: flex-start;
   justify-content: center;
   gap: 18px;
-  margin-top: 4px;
+  margin-top: 2px;
 }
 
 .session-gate-option {
@@ -827,10 +868,23 @@
   background: #3a4048;
 }
 
-.session-gate-docs-btn {
+.session-gate-docs-link {
   margin-top: 2px;
-  padding: 6px 12px;
+  padding: 0;
   border: none;
+  background: transparent;
+  color: #6b7280;
+  font-size: 11px;
+  font-weight: normal;
+  width: auto;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.session-gate-docs-link:hover {
+  background: transparent;
+  color: #94a3b8;
 }
 
 .session-gate-footer {
@@ -845,7 +899,7 @@
   letter-spacing: 0.02em;
   margin: 0;
   width: auto;
-  padding: 0;
+  padding: 5px;
   cursor: pointer;
 }
 
