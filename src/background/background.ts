@@ -12,9 +12,11 @@ import {
 import { generateParticipationText, inferQuestionFromResponses } from './summarizer'
 import {
   appendDiscussion,
+  deleteSession,
   endSession,
   getActiveSession,
   loadStore,
+  saveStore,
   setDiscussionParticipation,
   startSession,
 } from './storage'
@@ -26,6 +28,8 @@ const DEFAULT_CONTEXT_WINDOW = 20
 const DEFAULT_DEBUG_WINDOW = 20
 const MAX_DEBUG_LOGS = 30
 const STATE_STORAGE_KEY = 'discussionAssistantManualState'
+const OPENAI_API_KEY_STORAGE_KEY = 'discussionAssistantOpenAIApiKey'
+const CONTEXT_WINDOW_STORAGE_KEY = 'discussionAssistantContextWindow'
 const ALLOWED_BBB_HOSTS = new Set([
   'bbb-23.finki.ukim.mk',
   'bbb-24.finki.ukim.mk',
@@ -121,6 +125,52 @@ async function safeStorageSet<T>(key: string, value: T): Promise<void> {
 
 async function persistState(): Promise<void> {
   await safeStorageSet(STATE_STORAGE_KEY, popupState)
+}
+
+async function loadOpenAiApiKey(): Promise<string | null> {
+  try {
+    const result = await chrome.storage.local.get(OPENAI_API_KEY_STORAGE_KEY)
+    const value = result[OPENAI_API_KEY_STORAGE_KEY]
+    if (typeof value !== 'string') {
+      return null
+    }
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : null
+  } catch {
+    return null
+  }
+}
+
+async function saveOpenAiApiKey(apiKey: string): Promise<void> {
+  const trimmed = apiKey.trim()
+  if (!trimmed) {
+    await chrome.storage.local.remove(OPENAI_API_KEY_STORAGE_KEY)
+    return
+  }
+  await chrome.storage.local.set({
+    [OPENAI_API_KEY_STORAGE_KEY]: trimmed,
+  })
+}
+
+async function loadContextWindow(): Promise<number> {
+  try {
+    const result = await chrome.storage.local.get(CONTEXT_WINDOW_STORAGE_KEY)
+    const raw = result[CONTEXT_WINDOW_STORAGE_KEY]
+    const numeric = typeof raw === 'number' ? raw : Number(raw)
+    if (!Number.isFinite(numeric)) {
+      return DEFAULT_CONTEXT_WINDOW
+    }
+    return Math.max(5, Math.min(200, Math.round(numeric)))
+  } catch {
+    return DEFAULT_CONTEXT_WINDOW
+  }
+}
+
+async function saveContextWindow(contextWindow: number): Promise<void> {
+  const bounded = Math.max(5, Math.min(200, Math.round(contextWindow)))
+  await chrome.storage.local.set({
+    [CONTEXT_WINDOW_STORAGE_KEY]: bounded,
+  })
 }
 
 async function restoreState(): Promise<void> {
@@ -451,13 +501,18 @@ async function handleAnalyzeDiscussion(messageWindow: number): Promise<Discussio
   sendPopupStateUpdate()
 
   try {
+    const apiKey = await loadOpenAiApiKey()
+    if (!apiKey) {
+      throw new Error('OpenAI API key is missing. Add it in Settings.')
+    }
+
     const tabId = await getActiveBbbTabId()
     if (tabId === null) {
       throw new Error('No active BigBlueButton tab found. Open BBB and try again.')
     }
 
     const recentMessages = await fetchRecentMessages(tabId, messageWindow)
-    const inferredQuestion = inferQuestionFromResponses(recentMessages)
+    const inferredQuestion = await inferQuestionFromResponses(recentMessages, apiKey)
 
     const analysis: DiscussionAnalysisResult = {
       inferredQuestion,
@@ -492,6 +547,83 @@ async function handleAnalyzeDiscussion(messageWindow: number): Promise<Discussio
     }
 
     log('Discussion analyzed', { messageCount: recentMessages.length })
+    return analysis
+  } catch (error) {
+    const errorText = error instanceof Error ? error.message : String(error)
+    setLastError(errorText)
+    throw error
+  } finally {
+    popupState = {
+      ...popupState,
+      isAnalyzing: false,
+    }
+    sendPopupStateUpdate()
+    await persistState()
+  }
+}
+
+async function handleAnalyzeFromContext(
+  messageWindow: number,
+  capturedAt: number,
+  contextMessages: ChatMessage[],
+): Promise<DiscussionAnalysisResult> {
+  await refreshStore()
+  syncSessionStateToPopup()
+
+  const activeSession = getActiveSession(store)
+  if (!activeSession) {
+    const errorText = 'No active session. Start a new session first.'
+    setLastError(errorText)
+    sendPopupStateUpdate()
+    await persistState()
+    throw new Error(errorText)
+  }
+
+  popupState = {
+    ...popupState,
+    isAnalyzing: true,
+  }
+  clearLastError()
+  sendPopupStateUpdate()
+
+  try {
+    const apiKey = await loadOpenAiApiKey()
+    if (!apiKey) {
+      throw new Error('OpenAI API key is missing. Add it in Settings.')
+    }
+    const inferredQuestion = await inferQuestionFromResponses(contextMessages, apiKey)
+    const analysis: DiscussionAnalysisResult = {
+      inferredQuestion,
+      contextMessages,
+      capturedAt,
+    }
+
+    const discussion: DiscussionRecord = {
+      id: createDiscussionId(),
+      createdAt: Date.now(),
+      inferredQuestion: analysis.inferredQuestion,
+      contextMessages: analysis.contextMessages,
+      source: {
+        messageWindow,
+        capturedAt,
+      },
+    }
+    await appendDiscussion(activeSession.id, discussion)
+    await refreshStore()
+    syncSessionStateToPopup()
+
+    popupState = {
+      ...popupState,
+      analysis,
+      activeDiscussionId: discussion.id,
+      debug: {
+        ...popupState.debug,
+        collectedMessages: contextMessages,
+        messageCount: contextMessages.length,
+        lastAnalysisAt: Date.now(),
+      },
+    }
+
     return analysis
   } catch (error) {
     const errorText = error instanceof Error ? error.message : String(error)
@@ -563,13 +695,18 @@ async function handleGenerateParticipation(inferredQuestion: string, contextMess
   sendPopupStateUpdate()
 
   try {
+    const apiKey = await loadOpenAiApiKey()
+    if (!apiKey) {
+      throw new Error('OpenAI API key is missing. Add it in Settings.')
+    }
+
     const tabId = await getActiveBbbTabId()
     if (tabId === null) {
       throw new Error('No active BigBlueButton tab found for autofill.')
     }
 
     const boundedContext = sliceContextMessages(contextMessages)
-    const generatedText = generateParticipationText(inferredQuestion, boundedContext)
+    const generatedText = await generateParticipationText(inferredQuestion, boundedContext, apiKey)
     await autofillToChat(tabId, generatedText)
 
     const participation: ParticipationResult = {
@@ -610,6 +747,69 @@ async function handleGenerateParticipation(inferredQuestion: string, contextMess
   }
 }
 
+async function handleParticipateWithText(text: string): Promise<string> {
+  await refreshStore()
+  syncSessionStateToPopup()
+
+  const activeSession = getActiveSession(store)
+  if (!activeSession) {
+    const errorText = 'No active session. Start a new session first.'
+    setLastError(errorText)
+    sendPopupStateUpdate()
+    await persistState()
+    throw new Error(errorText)
+  }
+
+  await refreshCompatibilityState()
+  popupState = {
+    ...popupState,
+    isGenerating: true,
+  }
+  clearLastError()
+  sendPopupStateUpdate()
+
+  try {
+    const tabId = await getActiveBbbTabId()
+    if (tabId === null) {
+      throw new Error('No active BigBlueButton tab found for autofill.')
+    }
+
+    await autofillToChat(tabId, text)
+    const participation: ParticipationResult = {
+      text,
+      generatedAt: Date.now(),
+    }
+
+    const discussionId =
+      popupState.activeDiscussionId ||
+      activeSession.discussions.at(-1)?.id
+
+    if (discussionId) {
+      await setDiscussionParticipation(activeSession.id, discussionId, participation)
+      await refreshStore()
+      syncSessionStateToPopup()
+    }
+
+    popupState = {
+      ...popupState,
+      participation,
+    }
+
+    return text
+  } catch (error) {
+    const errorText = error instanceof Error ? error.message : String(error)
+    setLastError(errorText)
+    throw error
+  } finally {
+    popupState = {
+      ...popupState,
+      isGenerating: false,
+    }
+    sendPopupStateUpdate()
+    await persistState()
+  }
+}
+
 function isRuntimeMessage(value: unknown): value is RuntimeMessage {
   if (!value || typeof value !== 'object') {
     return false
@@ -627,8 +827,28 @@ function isGenerateMessage(message: RuntimeMessage): message is RuntimeMessage<'
   return message.type === MESSAGE_TYPES.GENERATE_PARTICIPATION
 }
 
+function isAnalyzeFromContext(message: RuntimeMessage): message is RuntimeMessage<'ANALYZE_FROM_CONTEXT'> {
+  return message.type === MESSAGE_TYPES.ANALYZE_FROM_CONTEXT
+}
+
+function isParticipateWithText(message: RuntimeMessage): message is RuntimeMessage<'PARTICIPATE_WITH_TEXT'> {
+  return message.type === MESSAGE_TYPES.PARTICIPATE_WITH_TEXT
+}
+
 function isDebugGetMessages(message: RuntimeMessage): message is RuntimeMessage<'DEBUG_GET_MESSAGES'> {
   return message.type === MESSAGE_TYPES.DEBUG_GET_MESSAGES
+}
+
+function isSettingsSetApiKey(message: RuntimeMessage): message is RuntimeMessage<'SETTINGS_SET_API_KEY'> {
+  return message.type === MESSAGE_TYPES.SETTINGS_SET_API_KEY
+}
+
+function isSettingsSetContextWindow(message: RuntimeMessage): message is RuntimeMessage<'SETTINGS_SET_CONTEXT_WINDOW'> {
+  return message.type === MESSAGE_TYPES.SETTINGS_SET_CONTEXT_WINDOW
+}
+
+function isSessionDeleteMessage(message: RuntimeMessage): message is RuntimeMessage<'SESSION_DELETE'> {
+  return message.type === MESSAGE_TYPES.SESSION_DELETE
 }
 
 async function handleRuntimeMessage(message: unknown): Promise<unknown> {
@@ -697,6 +917,57 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
     }
   }
 
+  if (isSessionDeleteMessage(message)) {
+    try {
+      const sessionId = message.payload?.sessionId?.trim()
+      if (!sessionId) {
+        return { error: 'Missing session id.' }
+      }
+
+      await refreshStore()
+      const targetSession = store.sessions.find((session) => session.id === sessionId)
+      if (!targetSession) {
+        return { error: 'Session not found.' }
+      }
+      const deletingActiveSession = store.activeSessionId === sessionId
+
+      await deleteSession(sessionId)
+      await refreshStore()
+      syncSessionStateToPopup()
+
+      if (deletingActiveSession) {
+        popupState = {
+          ...popupState,
+          analysis: undefined,
+          participation: undefined,
+          activeDiscussionId: undefined,
+          debug: {
+            ...popupState.debug,
+            collectedMessages: [],
+            messageCount: 0,
+          },
+        }
+      } else {
+        popupState = {
+          ...popupState,
+          activeDiscussionId: popupState.activeSession?.discussions.at(-1)?.id,
+        }
+      }
+
+      addDebugLog(`Deleted session ${sessionId}.`)
+      clearLastError()
+      sendPopupStateUpdate()
+      await persistState()
+      return { success: true }
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error)
+      setLastError(errorText)
+      sendPopupStateUpdate()
+      await persistState()
+      return { error: errorText }
+    }
+  }
+
   if (message.type === MESSAGE_TYPES.SESSION_LIST) {
     await refreshStore()
     return {
@@ -705,10 +976,89 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
     }
   }
 
+  if (message.type === MESSAGE_TYPES.SETTINGS_CLEAR_SESSIONS) {
+    store = {
+      schemaVersion: 1,
+      sessions: [],
+      activeSessionId: undefined,
+    }
+    await saveStore(store)
+    syncSessionStateToPopup()
+    popupState = {
+      ...popupState,
+      analysis: undefined,
+      participation: undefined,
+      activeDiscussionId: undefined,
+      debug: {
+        ...popupState.debug,
+        collectedMessages: [],
+        messageCount: 0,
+      },
+    }
+    clearLastError()
+    sendPopupStateUpdate()
+    await persistState()
+    return { success: true }
+  }
+
+  if (message.type === MESSAGE_TYPES.SETTINGS_EXPORT_SESSIONS) {
+    await refreshStore()
+    return { store }
+  }
+
+  if (message.type === MESSAGE_TYPES.SETTINGS_GET) {
+    const apiKey = await loadOpenAiApiKey()
+    const contextWindow = await loadContextWindow()
+    return {
+      apiKey: apiKey ?? '',
+      hasApiKey: Boolean(apiKey),
+      contextWindow,
+    }
+  }
+
+  if (isSettingsSetApiKey(message)) {
+    try {
+      await saveOpenAiApiKey(message.payload.apiKey ?? '')
+      return { success: true }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  if (isSettingsSetContextWindow(message)) {
+    try {
+      await saveContextWindow(message.payload.contextWindow)
+      const contextWindow = await loadContextWindow()
+      return { success: true, contextWindow }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
   if (isAnalyzeMessage(message)) {
     try {
       const limit = Math.max(1, Math.min(100, message.payload.messageWindow || DEFAULT_MESSAGE_WINDOW))
       const analysis = await handleAnalyzeDiscussion(limit)
+      return analysis
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  if (isAnalyzeFromContext(message)) {
+    try {
+      const limit = Math.max(1, Math.min(100, message.payload.messageWindow || DEFAULT_MESSAGE_WINDOW))
+      const analysis = await handleAnalyzeFromContext(
+        limit,
+        message.payload.capturedAt || Date.now(),
+        message.payload.contextMessages ?? [],
+      )
       return analysis
     } catch (error) {
       return {
@@ -731,6 +1081,24 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
       const text = await handleGenerateParticipation(question, context)
       return {
         text,
+        generatedAt: Date.now(),
+      }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  if (isParticipateWithText(message)) {
+    try {
+      const text = (message.payload.text ?? '').trim()
+      if (!text) {
+        throw new Error('Participation text is empty.')
+      }
+      const committed = await handleParticipateWithText(text)
+      return {
+        text: committed,
         generatedAt: Date.now(),
       }
     } catch (error) {

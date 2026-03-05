@@ -106,6 +106,19 @@ export async function endSession(sessionId: string): Promise<void> {
   await saveStore(nextStore)
 }
 
+export async function deleteSession(sessionId: string): Promise<void> {
+  const store = await loadStore()
+  const sessions = store.sessions.filter((session) => session.id !== sessionId)
+
+  const nextStore: StoredData = {
+    ...store,
+    activeSessionId: store.activeSessionId === sessionId ? undefined : store.activeSessionId,
+    sessions,
+  }
+
+  await saveStore(nextStore)
+}
+
 export async function appendDiscussion(sessionId: string, discussion: DiscussionRecord): Promise<void> {
   const store = await loadStore()
 

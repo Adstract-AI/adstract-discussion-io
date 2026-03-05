@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Adstract Discussion Assistant",
-  "description": "AI discussion assistant for live sessions",
+  "name": "Discussion.IO",
+  "description": "Discussion.IO for live class participation",
   "version": "0.1.0",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
     "https://bbb-23.finki.ukim.mk/html5client/join*",
-    "https://bbb-24.finki.ukim.mk/html5client/join*"
+    "https://bbb-24.finki.ukim.mk/html5client/join*",
+    "https://api.openai.com/*"
   ],
   "background": {
     "service_worker": "src/background/background.ts",
@@ -23,7 +24,7 @@
     }
   ],
   "action": {
-    "default_title": "Discussion Assistant",
+    "default_title": "Discussion.IO",
     "default_popup": "index.html"
   }
 }

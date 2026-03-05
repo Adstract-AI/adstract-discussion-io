@@ -11,6 +11,12 @@ export interface DiscussionAnalysisRequest {
   messageWindow: number
 }
 
+export interface AnalyzeFromContextRequest {
+  messageWindow: number
+  capturedAt: number
+  contextMessages: ChatMessage[]
+}
+
 export interface DebugGetMessagesRequest {
   limit: number
 }
@@ -24,6 +30,22 @@ export interface DiscussionAnalysisResult {
 export interface ParticipationRequest {
   inferredQuestion: string
   contextMessages: ChatMessage[]
+}
+
+export interface ParticipateWithTextRequest {
+  text: string
+}
+
+export interface SetApiKeyRequest {
+  apiKey: string
+}
+
+export interface SetContextWindowRequest {
+  contextWindow: number
+}
+
+export interface DeleteSessionRequest {
+  sessionId: string
 }
 
 export interface ParticipationResult {
@@ -103,15 +125,23 @@ export interface PopupViewState {
 
 export interface RuntimeMessageMap {
   ANALYZE_DISCUSSION: DiscussionAnalysisRequest
+  ANALYZE_FROM_CONTEXT: AnalyzeFromContextRequest
   DEBUG_GET_MESSAGES: DebugGetMessagesRequest
   DEBUG_CLEAR_MESSAGES: undefined
   DEBUG_CLEAR_LOGS: undefined
   GENERATE_PARTICIPATION: ParticipationRequest
+  PARTICIPATE_WITH_TEXT: ParticipateWithTextRequest
   GET_POPUP_STATE: undefined
   SESSION_GET_STATE: undefined
   SESSION_START: undefined
   SESSION_END: undefined
+  SESSION_DELETE: DeleteSessionRequest
   SESSION_LIST: undefined
+  SETTINGS_CLEAR_SESSIONS: undefined
+  SETTINGS_EXPORT_SESSIONS: undefined
+  SETTINGS_GET: undefined
+  SETTINGS_SET_API_KEY: SetApiKeyRequest
+  SETTINGS_SET_CONTEXT_WINDOW: SetContextWindowRequest
   FETCH_RECENT_MESSAGES: FetchRecentMessagesRequest
   RECENT_MESSAGES_RESULT: RecentMessagesResult
   AUTOFILL_TEXT: AutofillTextRequest
@@ -127,15 +157,23 @@ export type RuntimeMessage<T extends RuntimeMessageType = RuntimeMessageType> =
 
 export const MESSAGE_TYPES = {
   ANALYZE_DISCUSSION: 'ANALYZE_DISCUSSION',
+  ANALYZE_FROM_CONTEXT: 'ANALYZE_FROM_CONTEXT',
   DEBUG_GET_MESSAGES: 'DEBUG_GET_MESSAGES',
   DEBUG_CLEAR_MESSAGES: 'DEBUG_CLEAR_MESSAGES',
   DEBUG_CLEAR_LOGS: 'DEBUG_CLEAR_LOGS',
   GENERATE_PARTICIPATION: 'GENERATE_PARTICIPATION',
+  PARTICIPATE_WITH_TEXT: 'PARTICIPATE_WITH_TEXT',
   GET_POPUP_STATE: 'GET_POPUP_STATE',
   SESSION_GET_STATE: 'SESSION_GET_STATE',
   SESSION_START: 'SESSION_START',
   SESSION_END: 'SESSION_END',
+  SESSION_DELETE: 'SESSION_DELETE',
   SESSION_LIST: 'SESSION_LIST',
+  SETTINGS_CLEAR_SESSIONS: 'SETTINGS_CLEAR_SESSIONS',
+  SETTINGS_EXPORT_SESSIONS: 'SETTINGS_EXPORT_SESSIONS',
+  SETTINGS_GET: 'SETTINGS_GET',
+  SETTINGS_SET_API_KEY: 'SETTINGS_SET_API_KEY',
+  SETTINGS_SET_CONTEXT_WINDOW: 'SETTINGS_SET_CONTEXT_WINDOW',
   FETCH_RECENT_MESSAGES: 'FETCH_RECENT_MESSAGES',
   RECENT_MESSAGES_RESULT: 'RECENT_MESSAGES_RESULT',
   AUTOFILL_TEXT: 'AUTOFILL_TEXT',
