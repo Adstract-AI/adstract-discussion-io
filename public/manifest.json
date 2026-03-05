@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Adstract Discussion Assistant",
+  "description": "AI discussion assistant for live sessions",
+  "version": "0.1.0",
+  "permissions": ["storage", "activeTab", "scripting"],
+  "host_permissions": ["*://*/bigbluebutton/*", "*://*/html5client/*"],
+  "background": {
+    "service_worker": "src/background/background.ts",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*/bigbluebutton/*", "*://*/html5client/*"],
+      "js": ["src/content/content.ts"],
+      "run_at": "document_idle"
+    }
+  ],
+  "action": {
+    "default_title": "Discussion Assistant",
+    "default_popup": "index.html"
+  }
+}
