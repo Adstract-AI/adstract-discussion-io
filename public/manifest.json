@@ -4,14 +4,20 @@
   "description": "AI discussion assistant for live sessions",
   "version": "0.1.0",
   "permissions": ["storage", "activeTab", "scripting"],
-  "host_permissions": ["*://*/bigbluebutton/*", "*://*/html5client/*"],
+  "host_permissions": [
+    "https://bbb-23.finki.ukim.mk/html5client/join*",
+    "https://bbb-24.finki.ukim.mk/html5client/join*"
+  ],
   "background": {
     "service_worker": "src/background/background.ts",
     "type": "module"
   },
   "content_scripts": [
     {
-      "matches": ["*://*/bigbluebutton/*", "*://*/html5client/*"],
+      "matches": [
+        "https://bbb-23.finki.ukim.mk/html5client/join*",
+        "https://bbb-24.finki.ukim.mk/html5client/join*"
+      ],
       "js": ["src/content/content.ts"],
       "run_at": "document_idle"
     }

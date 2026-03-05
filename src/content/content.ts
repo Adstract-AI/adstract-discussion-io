@@ -1,8 +1,14 @@
 import { MESSAGE_TYPES, type AutofillTextResult, type RecentMessagesResult, type RuntimeMessage } from '../types/chat'
-import { extractRecentMessages, findChatInput } from './chatParser'
+import { extractRecentMessages, findChatContainer, findChatInput, findVirtualizedInnerContainer } from './chatParser'
 
 const LOG_PREFIX = '[ContentScript]'
 const DEV_MODE = import.meta.env.DEV
+
+declare global {
+  interface Window {
+    __discussionAssistantInitialized?: boolean
+  }
+}
 
 function log(...args: unknown[]): void {
   if (DEV_MODE) {
@@ -42,7 +48,28 @@ function autofillText(text: string): AutofillTextResult {
 }
 
 function buildRecentMessagesResult(limit: number): RecentMessagesResult {
+  const container = findChatContainer(document)
+  if (!container) {
+    log('FETCH_RECENT_MESSAGES failed: chat container not found')
+    return {
+      messages: [],
+      capturedAt: Date.now(),
+      error: 'Chat container not found.',
+    }
+  }
+
+  const innerContainer = findVirtualizedInnerContainer(container)
+  if (!innerContainer) {
+    log('FETCH_RECENT_MESSAGES failed: inner virtualized container not found')
+    return {
+      messages: [],
+      capturedAt: Date.now(),
+      error: 'Virtualized inner chat container not found.',
+    }
+  }
+
   const messages = extractRecentMessages(document, limit)
+  log(`FETCH_RECENT_MESSAGES parsed ${messages.length} messages (limit=${limit})`)
   return {
     messages,
     capturedAt: Date.now(),
@@ -72,11 +99,15 @@ function handleRuntimeMessage(
   if (isFetchRecentMessage(typed)) {
     const limit = Math.max(1, Math.min(100, typed.payload.limit))
     const payload = buildRecentMessagesResult(limit)
+    if (payload.error) {
+      log(`FETCH_RECENT_MESSAGES returning error: ${payload.error}`)
+    }
     sendResponse({ type: MESSAGE_TYPES.RECENT_MESSAGES_RESULT, payload })
     return
   }
 
   if (isAutofillMessage(typed)) {
+    log('AUTOFILL_TEXT requested by background')
     sendResponse(autofillText(typed.payload.text))
     return
   }
@@ -85,10 +116,17 @@ function handleRuntimeMessage(
 }
 
 function bootstrap(): void {
+  if (window.__discussionAssistantInitialized) {
+    log('Already initialized in this page context; skipping duplicate init.')
+    return
+  }
+
   if (!likelyBigBlueButtonPage()) {
     log('Not a BBB-like page; content handlers are idle.')
     return
   }
+
+  window.__discussionAssistantInitialized = true
 
   chrome.runtime.onMessage.addListener((message: unknown, _sender: unknown, sendResponse: (response?: unknown) => void) => {
     handleRuntimeMessage(message, sendResponse as (response?: RuntimeMessage<'RECENT_MESSAGES_RESULT'> | AutofillTextResult) => void)

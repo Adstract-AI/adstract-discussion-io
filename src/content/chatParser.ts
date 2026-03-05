@@ -1,6 +1,7 @@
 import type { ChatMessage } from '../types/chat'
 
 const CHAT_CONTAINER_SELECTORS = [
+  '.ReactVirtualized__Grid.ReactVirtualized__List[class*="messageList--"]',
   '[data-testid="chatMessages"]',
   '[aria-label*="chat" i][role="log"]',
   '[aria-label*="chat" i] [role="list"]',
@@ -11,6 +12,10 @@ const CHAT_CONTAINER_SELECTORS = [
   '[data-testid*="chat" i]',
   '[class*="chat" i]',
 ] as const
+
+const VIRTUALIZED_INNER_SELECTOR = '.ReactVirtualized__Grid__innerScrollContainer'
+
+const PRIMARY_MESSAGE_NODE_SELECTOR = ':scope > span > div[class*="item--"]'
 
 const CHAT_MESSAGE_NODE_SELECTORS = [
   '[data-testid*="chatmessage" i]',
@@ -29,6 +34,7 @@ const CHAT_INPUT_SELECTORS = [
 ] as const
 
 const USERNAME_SELECTORS = [
+  '[class*="name--"]',
   '[data-testid="chatUser"]',
   '[class*="user" i]',
   '[class*="sender" i]',
@@ -37,6 +43,7 @@ const USERNAME_SELECTORS = [
 ] as const
 
 const MESSAGE_SELECTORS = [
+  'p[data-test="chatUserMessageText"]',
   '[data-testid="chatMessage"]',
   '[class*="message" i]',
   '[class*="content" i]',
@@ -46,6 +53,7 @@ const MESSAGE_SELECTORS = [
 ] as const
 
 const TIMESTAMP_SELECTORS = [
+  'time[class*="time--"]',
   'time',
   '[data-testid="chatTime"]',
   '[class*="time" i]',
@@ -82,6 +90,34 @@ function firstTextBySelectors(root: Element, selectors: readonly string[]): stri
       if (value) {
         return value
       }
+    }
+  }
+
+  return undefined
+}
+
+function firstTimestampValue(root: Element): string | undefined {
+  for (const selector of TIMESTAMP_SELECTORS) {
+    const found = root.querySelector(selector)
+    if (!(found instanceof HTMLElement)) {
+      continue
+    }
+
+    if (found instanceof HTMLTimeElement) {
+      const datetime = normalizeText(found.dateTime)
+      if (datetime) {
+        return datetime
+      }
+    }
+
+    const attrDatetime = normalizeText(found.getAttribute('datetime') ?? '')
+    if (attrDatetime) {
+      return attrDatetime
+    }
+
+    const textValue = normalizeText(found.textContent ?? '')
+    if (textValue) {
+      return textValue
     }
   }
 
@@ -128,9 +164,46 @@ function looksLikeUsernameCandidate(value: string): boolean {
   return !/[.!?]{2,}/.test(value)
 }
 
+function extractStudentIndex(username: string): string | undefined {
+  const match = username.match(/\((\d+)\)/)
+  if (!match) {
+    return undefined
+  }
+  return match[1]
+}
+
 function buildMessageId(message: Omit<ChatMessage, 'id'>, index: number): string {
   const raw = `${message.username}|${message.text}|${message.timestamp}|${index}`
   return `msg-${stableHash(raw)}`
+}
+
+function collectMessageCandidates(container: Element): Element[] {
+  const innerContainer = findVirtualizedInnerContainer(container)
+
+  if (innerContainer) {
+    const primaryNodes = Array.from(innerContainer.querySelectorAll(PRIMARY_MESSAGE_NODE_SELECTOR))
+      .filter((node): node is Element => node instanceof Element)
+
+    if (primaryNodes.length > 0) {
+      return primaryNodes
+    }
+  }
+
+  const fallbackNodes: Element[] = []
+  for (const selector of CHAT_MESSAGE_NODE_SELECTORS) {
+    const nodes = container.querySelectorAll(selector)
+    for (const node of nodes) {
+      if (node instanceof Element) {
+        fallbackNodes.push(node)
+      }
+    }
+  }
+
+  if (fallbackNodes.length > 0) {
+    return fallbackNodes
+  }
+
+  return Array.from(container.children).filter((node): node is Element => node instanceof Element)
 }
 
 export function findChatContainer(root: ParentNode = document): Element | null {
@@ -139,6 +212,15 @@ export function findChatContainer(root: ParentNode = document): Element | null {
     if (candidate) {
       return candidate
     }
+  }
+
+  return null
+}
+
+export function findVirtualizedInnerContainer(root: ParentNode = document): Element | null {
+  const direct = root.querySelector(VIRTUALIZED_INNER_SELECTOR)
+  if (direct) {
+    return direct
   }
 
   return null
@@ -163,9 +245,10 @@ export function parseChatMessage(node: Element): ChatMessage | null {
 
   const usernameRaw = firstTextBySelectors(node, USERNAME_SELECTORS)
   const messageText = firstTextBySelectors(node, MESSAGE_SELECTORS) ?? combinedText
-  const timestampRaw = firstTextBySelectors(node, TIMESTAMP_SELECTORS)
+  const timestampRaw = firstTimestampValue(node)
 
   const username = usernameRaw && looksLikeUsernameCandidate(usernameRaw) ? usernameRaw : 'Unknown'
+  const studentIndex = extractStudentIndex(username)
   const text = normalizeText(messageText)
 
   if (!text || text.length < 2) {
@@ -175,6 +258,7 @@ export function parseChatMessage(node: Element): ChatMessage | null {
   return {
     id: '',
     username,
+    studentIndex,
     text,
     timestamp: parseTimestamp(timestampRaw),
     rawTimestamp: timestampRaw,
@@ -201,30 +285,16 @@ export function extractRecentMessages(root: ParentNode = document, limit = 20): 
     return []
   }
 
-  const candidates: Element[] = []
-  for (const selector of CHAT_MESSAGE_NODE_SELECTORS) {
-    const nodes = container.querySelectorAll(selector)
-    for (const node of nodes) {
-      if (node instanceof Element) {
-        candidates.push(node)
-      }
-    }
-  }
-
-  if (candidates.length === 0) {
-    const directChildren = Array.from(container.children)
-    for (const child of directChildren) {
-      if (child instanceof Element) {
-        candidates.push(child)
-      }
-    }
-  }
-
+  const candidates = collectMessageCandidates(container)
   const dedup = new Map<string, ChatMessage>()
 
   candidates.forEach((node, index) => {
     const parsed = parseChatMessage(node)
     if (!parsed || isSystemMessage(node, parsed)) {
+      return
+    }
+
+    if (!parsed.studentIndex) {
       return
     }
 
