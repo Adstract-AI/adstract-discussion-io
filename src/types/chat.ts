@@ -30,10 +30,21 @@ export interface DiscussionAnalysisResult {
 export interface ParticipationRequest {
   inferredQuestion: string
   contextMessages: ChatMessage[]
+  previousSuggestions?: string[]
+  previousParticipations?: string[]
+}
+
+export interface SimilarQuestionRequest {
+  inferredQuestion: string
+  contextMessages: ChatMessage[]
+  previousQuestions?: string[]
+  previousParticipations?: string[]
 }
 
 export interface ParticipateWithTextRequest {
   text: string
+  autofill?: boolean
+  submit?: boolean
 }
 
 export interface SetApiKeyRequest {
@@ -48,6 +59,10 @@ export interface DeleteSessionRequest {
   sessionId: string
 }
 
+export interface RestoreSessionRequest {
+  sessionId: string
+}
+
 export interface ParticipationResult {
   text: string
   generatedAt: number
@@ -58,6 +73,7 @@ export interface DiscussionRecord {
   createdAt: number
   inferredQuestion: string
   contextMessages: ChatMessage[]
+  participations?: ParticipationResult[]
   participation?: ParticipationResult
   source: {
     messageWindow: number
@@ -91,6 +107,11 @@ export interface RecentMessagesResult {
 }
 
 export interface AutofillTextRequest {
+  text: string
+  submit?: boolean
+}
+
+export interface ManualAutofillDraftRequest {
   text: string
 }
 
@@ -130,12 +151,15 @@ export interface RuntimeMessageMap {
   DEBUG_CLEAR_MESSAGES: undefined
   DEBUG_CLEAR_LOGS: undefined
   GENERATE_PARTICIPATION: ParticipationRequest
+  GENERATE_SIMILAR_QUESTION: SimilarQuestionRequest
   PARTICIPATE_WITH_TEXT: ParticipateWithTextRequest
+  MANUAL_AUTOFILL_DRAFT: ManualAutofillDraftRequest
   GET_POPUP_STATE: undefined
   SESSION_GET_STATE: undefined
   SESSION_START: undefined
   SESSION_END: undefined
   SESSION_DELETE: DeleteSessionRequest
+  SESSION_RESTORE: RestoreSessionRequest
   SESSION_LIST: undefined
   SETTINGS_CLEAR_SESSIONS: undefined
   SETTINGS_EXPORT_SESSIONS: undefined
@@ -162,12 +186,15 @@ export const MESSAGE_TYPES = {
   DEBUG_CLEAR_MESSAGES: 'DEBUG_CLEAR_MESSAGES',
   DEBUG_CLEAR_LOGS: 'DEBUG_CLEAR_LOGS',
   GENERATE_PARTICIPATION: 'GENERATE_PARTICIPATION',
+  GENERATE_SIMILAR_QUESTION: 'GENERATE_SIMILAR_QUESTION',
   PARTICIPATE_WITH_TEXT: 'PARTICIPATE_WITH_TEXT',
+  MANUAL_AUTOFILL_DRAFT: 'MANUAL_AUTOFILL_DRAFT',
   GET_POPUP_STATE: 'GET_POPUP_STATE',
   SESSION_GET_STATE: 'SESSION_GET_STATE',
   SESSION_START: 'SESSION_START',
   SESSION_END: 'SESSION_END',
   SESSION_DELETE: 'SESSION_DELETE',
+  SESSION_RESTORE: 'SESSION_RESTORE',
   SESSION_LIST: 'SESSION_LIST',
   SETTINGS_CLEAR_SESSIONS: 'SETTINGS_CLEAR_SESSIONS',
   SETTINGS_EXPORT_SESSIONS: 'SETTINGS_EXPORT_SESSIONS',

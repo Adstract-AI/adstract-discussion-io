@@ -9,13 +9,14 @@ import {
   type RuntimeMessage,
   type StoredData,
 } from '../types/chat'
-import { generateParticipationText, inferQuestionFromResponses } from './summarizer'
+import { generateParticipationText, generateSimilarQuestion, inferQuestionFromResponses } from './summarizer'
 import {
   appendDiscussion,
   deleteSession,
   endSession,
   getActiveSession,
   loadStore,
+  restoreSession,
   saveStore,
   setDiscussionParticipation,
   startSession,
@@ -314,7 +315,7 @@ async function fetchRecentMessages(tabId: number, limit: number): Promise<ChatMe
   return typed.payload.messages
 }
 
-async function autofillToChat(tabId: number, text: string): Promise<void> {
+async function autofillToChat(tabId: number, text: string, submit = false): Promise<void> {
   let response: unknown
 
   try {
@@ -322,6 +323,7 @@ async function autofillToChat(tabId: number, text: string): Promise<void> {
       type: MESSAGE_TYPES.AUTOFILL_TEXT,
       payload: {
         text,
+        submit,
       },
     } satisfies RuntimeMessage<'AUTOFILL_TEXT'>)
   } catch (error) {
@@ -333,7 +335,7 @@ async function autofillToChat(tabId: number, text: string): Promise<void> {
     }
 
     addDebugLog('Using direct scripting fallback for autofill.')
-    await autofillViaScripting(tabId, text)
+    await autofillViaScripting(tabId, text, submit)
     return
   }
 
@@ -429,10 +431,10 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number): Pr
   return result.messages ?? []
 }
 
-async function autofillViaScripting(tabId: number, text: string): Promise<void> {
+async function autofillViaScripting(tabId: number, text: string, submit = false): Promise<void> {
   const execution = await chrome.scripting.executeScript({
     target: { tabId },
-    func: (value: string) => {
+    func: (value: string, shouldSubmit: boolean) => {
       const selectors = [
         'textarea[aria-label*="chat" i]',
         'textarea[placeholder*="message" i]',
@@ -462,9 +464,30 @@ async function autofillViaScripting(tabId: number, text: string): Promise<void> 
       input.dispatchEvent(new Event('change', { bubbles: true }))
       input.focus()
 
+      if (shouldSubmit) {
+        const sendSelectors = [
+          'button[class*="sendButton--"]',
+          'button[class*="buttonWrapper--"][class*="send"]',
+          'button[aria-label*="send" i]',
+          'button[title*="send" i]',
+        ]
+        const root = input.closest('[class*="input" i], [class*="footer" i], [class*="chat" i]') ?? input.parentElement ?? document.body
+        const localSendButton = sendSelectors
+          .map((selector) => root.querySelector(selector))
+          .find((node) => node instanceof HTMLButtonElement) as HTMLButtonElement | undefined
+        const sendButton = localSendButton ?? sendSelectors
+          .map((selector) => document.querySelector(selector))
+          .find((node) => node instanceof HTMLButtonElement) as HTMLButtonElement | undefined
+
+        if (!sendButton) {
+          return { success: false, error: 'Chat send button not found.' }
+        }
+        sendButton.click()
+      }
+
       return { success: true }
     },
-    args: [text],
+    args: [text, submit],
   })
 
   const result = execution[0]?.result as AutofillTextResult | undefined
@@ -525,6 +548,7 @@ async function handleAnalyzeDiscussion(messageWindow: number): Promise<Discussio
       createdAt: Date.now(),
       inferredQuestion: analysis.inferredQuestion,
       contextMessages: analysis.contextMessages,
+      participations: [],
       source: {
         messageWindow,
         capturedAt: analysis.capturedAt,
@@ -603,6 +627,7 @@ async function handleAnalyzeFromContext(
       createdAt: Date.now(),
       inferredQuestion: analysis.inferredQuestion,
       contextMessages: analysis.contextMessages,
+      participations: [],
       source: {
         messageWindow,
         capturedAt,
@@ -673,7 +698,12 @@ async function handleDebugGetMessages(limit: number): Promise<ChatMessage[]> {
   return recentMessages
 }
 
-async function handleGenerateParticipation(inferredQuestion: string, contextMessages: ChatMessage[]): Promise<string> {
+async function handleGenerateParticipation(
+  inferredQuestion: string,
+  contextMessages: ChatMessage[],
+  previousSuggestions: string[],
+  previousParticipations: string[],
+): Promise<string> {
   await refreshStore()
   syncSessionStateToPopup()
 
@@ -706,31 +736,14 @@ async function handleGenerateParticipation(inferredQuestion: string, contextMess
     }
 
     const boundedContext = sliceContextMessages(contextMessages)
-    const generatedText = await generateParticipationText(inferredQuestion, boundedContext, apiKey)
+    const generatedText = await generateParticipationText(
+      inferredQuestion,
+      boundedContext,
+      apiKey,
+      previousSuggestions,
+      previousParticipations,
+    )
     await autofillToChat(tabId, generatedText)
-
-    const participation: ParticipationResult = {
-      text: generatedText,
-      generatedAt: Date.now(),
-    }
-
-    const discussionId =
-      popupState.activeDiscussionId ||
-      activeSession.discussions.at(-1)?.id
-
-    if (discussionId) {
-      await setDiscussionParticipation(activeSession.id, discussionId, participation)
-      await refreshStore()
-      syncSessionStateToPopup()
-    }
-
-    popupState = {
-      ...popupState,
-      participation: {
-        text: participation.text,
-        generatedAt: participation.generatedAt,
-      },
-    }
 
     return generatedText
   } catch (error) {
@@ -747,7 +760,7 @@ async function handleGenerateParticipation(inferredQuestion: string, contextMess
   }
 }
 
-async function handleParticipateWithText(text: string): Promise<string> {
+async function handleParticipateWithText(text: string, shouldAutofill: boolean, shouldSubmit: boolean): Promise<string> {
   await refreshStore()
   syncSessionStateToPopup()
 
@@ -769,12 +782,13 @@ async function handleParticipateWithText(text: string): Promise<string> {
   sendPopupStateUpdate()
 
   try {
-    const tabId = await getActiveBbbTabId()
-    if (tabId === null) {
-      throw new Error('No active BigBlueButton tab found for autofill.')
+    if (shouldAutofill) {
+      const tabId = await getActiveBbbTabId()
+      if (tabId === null) {
+        throw new Error('No active BigBlueButton tab found for autofill.')
+      }
+      await autofillToChat(tabId, text, shouldSubmit)
     }
-
-    await autofillToChat(tabId, text)
     const participation: ParticipationResult = {
       text,
       generatedAt: Date.now(),
@@ -810,6 +824,15 @@ async function handleParticipateWithText(text: string): Promise<string> {
   }
 }
 
+async function handleManualAutofillDraft(text: string): Promise<void> {
+  const tabId = await getActiveBbbTabId()
+  if (tabId === null) {
+    throw new Error('No active BigBlueButton tab found for autofill.')
+  }
+
+  await autofillToChat(tabId, text)
+}
+
 function isRuntimeMessage(value: unknown): value is RuntimeMessage {
   if (!value || typeof value !== 'object') {
     return false
@@ -827,12 +850,20 @@ function isGenerateMessage(message: RuntimeMessage): message is RuntimeMessage<'
   return message.type === MESSAGE_TYPES.GENERATE_PARTICIPATION
 }
 
+function isGenerateSimilarQuestionMessage(message: RuntimeMessage): message is RuntimeMessage<'GENERATE_SIMILAR_QUESTION'> {
+  return message.type === MESSAGE_TYPES.GENERATE_SIMILAR_QUESTION
+}
+
 function isAnalyzeFromContext(message: RuntimeMessage): message is RuntimeMessage<'ANALYZE_FROM_CONTEXT'> {
   return message.type === MESSAGE_TYPES.ANALYZE_FROM_CONTEXT
 }
 
 function isParticipateWithText(message: RuntimeMessage): message is RuntimeMessage<'PARTICIPATE_WITH_TEXT'> {
   return message.type === MESSAGE_TYPES.PARTICIPATE_WITH_TEXT
+}
+
+function isManualAutofillDraftMessage(message: RuntimeMessage): message is RuntimeMessage<'MANUAL_AUTOFILL_DRAFT'> {
+  return message.type === MESSAGE_TYPES.MANUAL_AUTOFILL_DRAFT
 }
 
 function isDebugGetMessages(message: RuntimeMessage): message is RuntimeMessage<'DEBUG_GET_MESSAGES'> {
@@ -849,6 +880,10 @@ function isSettingsSetContextWindow(message: RuntimeMessage): message is Runtime
 
 function isSessionDeleteMessage(message: RuntimeMessage): message is RuntimeMessage<'SESSION_DELETE'> {
   return message.type === MESSAGE_TYPES.SESSION_DELETE
+}
+
+function isSessionRestoreMessage(message: RuntimeMessage): message is RuntimeMessage<'SESSION_RESTORE'> {
+  return message.type === MESSAGE_TYPES.SESSION_RESTORE
 }
 
 async function handleRuntimeMessage(message: unknown): Promise<unknown> {
@@ -968,6 +1003,43 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
     }
   }
 
+  if (isSessionRestoreMessage(message)) {
+    try {
+      const sessionId = message.payload?.sessionId?.trim()
+      if (!sessionId) {
+        return { error: 'Missing session id.' }
+      }
+
+      await refreshStore()
+      const targetSession = store.sessions.find((session) => session.id === sessionId)
+      if (!targetSession) {
+        return { error: 'Session not found.' }
+      }
+
+      await restoreSession(sessionId)
+      await refreshStore()
+      syncSessionStateToPopup()
+      popupState = {
+        ...popupState,
+        analysis: undefined,
+        participation: undefined,
+        activeDiscussionId: popupState.activeSession?.discussions.at(-1)?.id,
+      }
+
+      addDebugLog(`Restored session ${sessionId} as active.`)
+      clearLastError()
+      sendPopupStateUpdate()
+      await persistState()
+      return { success: true }
+    } catch (error) {
+      const errorText = error instanceof Error ? error.message : String(error)
+      setLastError(errorText)
+      sendPopupStateUpdate()
+      await persistState()
+      return { error: errorText }
+    }
+  }
+
   if (message.type === MESSAGE_TYPES.SESSION_LIST) {
     await refreshStore()
     return {
@@ -1073,12 +1145,14 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
       const context = message.payload.contextMessages?.length
         ? message.payload.contextMessages
         : popupState.analysis?.contextMessages ?? []
+      const previousSuggestions = (message.payload.previousSuggestions ?? []).filter((entry) => entry.trim().length > 0)
+      const previousParticipations = (message.payload.previousParticipations ?? []).filter((entry) => entry.trim().length > 0)
 
       if (!question) {
         throw new Error('No inferred question available. Analyze discussion first.')
       }
 
-      const text = await handleGenerateParticipation(question, context)
+      const text = await handleGenerateParticipation(question, context, previousSuggestions, previousParticipations)
       return {
         text,
         generatedAt: Date.now(),
@@ -1090,17 +1164,89 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
     }
   }
 
+  if (isGenerateSimilarQuestionMessage(message)) {
+    try {
+      const question = message.payload.inferredQuestion || popupState.analysis?.inferredQuestion
+      const context = message.payload.contextMessages?.length
+        ? message.payload.contextMessages
+        : popupState.analysis?.contextMessages ?? []
+      const previousQuestions = (message.payload.previousQuestions ?? []).filter((entry) => entry.trim().length > 0)
+      const previousParticipations = (message.payload.previousParticipations ?? []).filter((entry) => entry.trim().length > 0)
+
+      if (!question) {
+        throw new Error('No inferred question available. Analyze discussion first.')
+      }
+
+      popupState = {
+        ...popupState,
+        isGenerating: true,
+      }
+      clearLastError()
+      sendPopupStateUpdate()
+
+      const apiKey = await loadOpenAiApiKey()
+      if (!apiKey) {
+        throw new Error('OpenAI API key is missing. Add it in Settings.')
+      }
+
+      const similarQuestion = await generateSimilarQuestion(
+        question,
+        context,
+        apiKey,
+        previousQuestions,
+        previousParticipations,
+      )
+      popupState = {
+        ...popupState,
+        isGenerating: false,
+      }
+      sendPopupStateUpdate()
+      await persistState()
+
+      return {
+        text: similarQuestion,
+        generatedAt: Date.now(),
+      }
+    } catch (error) {
+      popupState = {
+        ...popupState,
+        isGenerating: false,
+      }
+      const errorText = error instanceof Error ? error.message : String(error)
+      setLastError(errorText)
+      sendPopupStateUpdate()
+      await persistState()
+      return {
+        error: errorText,
+      }
+    }
+  }
+
   if (isParticipateWithText(message)) {
     try {
       const text = (message.payload.text ?? '').trim()
       if (!text) {
         throw new Error('Participation text is empty.')
       }
-      const committed = await handleParticipateWithText(text)
+      const shouldAutofill = message.payload.autofill !== false
+      const shouldSubmit = message.payload.submit === true
+      const committed = await handleParticipateWithText(text, shouldAutofill, shouldSubmit)
       return {
         text: committed,
         generatedAt: Date.now(),
       }
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  if (isManualAutofillDraftMessage(message)) {
+    try {
+      const draftText = message.payload.text ?? ''
+      await handleManualAutofillDraft(draftText)
+      return { success: true }
     } catch (error) {
       return {
         error: error instanceof Error ? error.message : String(error),

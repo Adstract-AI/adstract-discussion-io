@@ -34,10 +34,26 @@ function validateStore(value: unknown): StoredData {
     return createEmptyStore()
   }
 
+  const normalizedSessions = store.sessions.map((session) => ({
+    ...session,
+    discussions: (session.discussions ?? []).map((discussion) => {
+      const existing = Array.isArray(discussion.participations)
+        ? discussion.participations
+        : []
+      const legacy = discussion.participation ? [discussion.participation] : []
+      const participations = [...existing, ...legacy]
+
+      return {
+        ...discussion,
+        participations,
+      }
+    }),
+  }))
+
   return {
     schemaVersion: 1,
     activeSessionId: store.activeSessionId,
-    sessions: store.sessions,
+    sessions: normalizedSessions,
   }
 }
 
@@ -119,6 +135,43 @@ export async function deleteSession(sessionId: string): Promise<void> {
   await saveStore(nextStore)
 }
 
+export async function restoreSession(sessionId: string): Promise<void> {
+  const store = await loadStore()
+  const now = Date.now()
+  const target = store.sessions.find((session) => session.id === sessionId)
+  if (!target) {
+    return
+  }
+
+  const sessions = store.sessions.map((session) => {
+    if (session.id === sessionId) {
+      return {
+        ...session,
+        status: 'active' as const,
+        endedAt: undefined,
+      }
+    }
+
+    if (store.activeSessionId && session.id === store.activeSessionId) {
+      return {
+        ...session,
+        status: 'ended' as const,
+        endedAt: session.endedAt ?? now,
+      }
+    }
+
+    return session
+  })
+
+  const nextStore: StoredData = {
+    ...store,
+    activeSessionId: sessionId,
+    sessions,
+  }
+
+  await saveStore(nextStore)
+}
+
 export async function appendDiscussion(sessionId: string, discussion: DiscussionRecord): Promise<void> {
   const store = await loadStore()
 
@@ -158,7 +211,7 @@ export async function setDiscussionParticipation(
 
       return {
         ...discussion,
-        participation,
+        participations: [...(discussion.participations ?? []), participation],
       }
     })
 

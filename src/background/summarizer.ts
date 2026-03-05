@@ -1,7 +1,7 @@
 import type { ChatMessage } from '../types/chat'
 import { DISCUSSION_ASSISTANT_SYSTEM_PROMPT } from './prompts/systemPrompt'
 
-const OPENAI_MODEL = 'gpt50-mini'
+const OPENAI_MODEL = 'gpt-5-mini'
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions'
 
 interface OpenAIChatCompletionResponse {
@@ -31,7 +31,6 @@ async function requestJsonObject(apiKey: string, userPrompt: string): Promise<Re
     },
     body: JSON.stringify({
       model: OPENAI_MODEL,
-      temperature: 0.3,
       response_format: { type: 'json_object' },
       messages: [
         {
@@ -82,15 +81,48 @@ export async function generateParticipationText(
   question: string,
   contextMessages: ChatMessage[],
   apiKey: string,
+  previousSuggestions: string[] = [],
+  previousParticipations: string[] = [],
 ): Promise<string> {
   const contextBlock = toContextBlock(contextMessages)
+  const avoidBlock = previousSuggestions
+    .map((entry, index) => `${index + 1}. ${entry}`)
+    .join('\n')
+  const participationHistoryBlock = previousParticipations
+    .map((entry, index) => `${index + 1}. ${entry}`)
+    .join('\n')
   const json = await requestJsonObject(
     apiKey,
-    `TASK: suggest_participation\n\nInferred question:\n${question}\n\nContext messages:\n${contextBlock || 'No context messages provided.'}`,
+    `TASK: suggest_participation\n\nInferred question:\n${question}\n\nContext messages:\n${contextBlock || 'No context messages provided.'}\n\nPrevious participations in this discussion (avoid repeating the same point):\n${participationHistoryBlock || 'None.'}\n\nPreviously suggested participation texts (DO NOT repeat):\n${avoidBlock || 'None.'}`,
   )
   const participationText = (json.participationText ?? '').toString().trim()
   if (!participationText) {
     throw new Error('OpenAI did not return participationText.')
   }
   return participationText
+}
+
+export async function generateSimilarQuestion(
+  question: string,
+  contextMessages: ChatMessage[],
+  apiKey: string,
+  previousQuestions: string[] = [],
+  previousParticipations: string[] = [],
+): Promise<string> {
+  const contextBlock = toContextBlock(contextMessages)
+  const avoidBlock = previousQuestions
+    .map((entry, index) => `${index + 1}. ${entry}`)
+    .join('\n')
+  const participationHistoryBlock = previousParticipations
+    .map((entry, index) => `${index + 1}. ${entry}`)
+    .join('\n')
+  const json = await requestJsonObject(
+    apiKey,
+    `TASK: suggest_similar_question\n\nCurrent question:\n${question}\n\nContext messages:\n${contextBlock || 'No context messages provided.'}\n\nPrevious participations in this discussion:\n${participationHistoryBlock || 'None.'}\n\nPreviously suggested similar questions (DO NOT repeat):\n${avoidBlock || 'None.'}`,
+  )
+  const similarQuestion = (json.similarQuestion ?? '').toString().trim()
+  if (!similarQuestion) {
+    throw new Error('OpenAI did not return similarQuestion.')
+  }
+  return similarQuestion
 }

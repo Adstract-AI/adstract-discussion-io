@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from 'react'
 import {
   type DiscussionRecord,
   MESSAGE_TYPES,
   type ChatMessage,
-  type DiscussionAnalysisResult,
   type PopupViewState,
   type RuntimeMessage,
   type SessionRecord,
@@ -11,10 +10,21 @@ import {
 
 const DEFAULT_MESSAGE_WINDOW = 20
 const DEV_MOCK_BASE = Date.now() - 1000 * 60 * 60
+const POPUP_UI_STATE_KEY = 'discussionAssistantPopupUiStateV1'
 
 type ViewMode = 'assistant' | 'debug'
-type AssistantFlowStage = 'idle' | 'collecting' | 'collected' | 'participating'
+type AssistantFlowStage = 'idle' | 'collecting' | 'collected' | 'awaiting-analysis' | 'participating' | 'awaiting-suggestion' | 'awaiting-similar-question'
 type SettingsTab = 'sessions' | 'ai' | 'context'
+
+interface PopupUiStateCache {
+  flowStage: AssistantFlowStage
+  capturedContextMessages: ChatMessage[]
+  capturedContextAt?: number
+  draftText: string
+  previousSuggestedParticipations: string[]
+  previousSuggestedQuestions: string[]
+  isContinuingPreviousDiscussion: boolean
+}
 
 const initialState: PopupViewState = {
   isAnalyzing: false,
@@ -49,10 +59,16 @@ const DEV_MOCK_DISCUSSIONS: DiscussionRecord[] = [
         timestamp: DEV_MOCK_BASE + 1000 * 60 * 3,
       },
     ],
-    participation: {
-      text: 'One practical way abstraction helps is by defining clear interfaces so teams can change internals without breaking each other’s work.',
-      generatedAt: DEV_MOCK_BASE + 1000 * 60 * 8,
-    },
+    participations: [
+      {
+        text: 'One practical way abstraction helps is by defining clear interfaces so teams can change internals without breaking each other’s work.',
+        generatedAt: DEV_MOCK_BASE + 1000 * 60 * 8,
+      },
+      {
+        text: 'Plus, abstraction reduces merge conflicts because teams touch fewer shared details.',
+        generatedAt: DEV_MOCK_BASE + 1000 * 60 * 9,
+      },
+    ],
     source: {
       messageWindow: 20,
       capturedAt: DEV_MOCK_BASE + 1000 * 60 * 4,
@@ -78,10 +94,12 @@ const DEV_MOCK_DISCUSSIONS: DiscussionRecord[] = [
         timestamp: DEV_MOCK_BASE + 1000 * 60 * 18,
       },
     ],
-    participation: {
-      text: 'I’d choose composition when flexibility matters, because small interchangeable components are easier to adapt than deep inheritance trees.',
-      generatedAt: DEV_MOCK_BASE + 1000 * 60 * 22,
-    },
+    participations: [
+      {
+        text: 'I’d choose composition when flexibility matters, because small interchangeable components are easier to adapt than deep inheritance trees.',
+        generatedAt: DEV_MOCK_BASE + 1000 * 60 * 22,
+      },
+    ],
     source: {
       messageWindow: 20,
       capturedAt: DEV_MOCK_BASE + 1000 * 60 * 19,
@@ -150,6 +168,33 @@ function stripIndexFromUsername(username: string): string {
   return username.replace(/\s*\(\d+\)\s*$/, '').trim()
 }
 
+function getDiscussionParticipations(discussion: DiscussionRecord): Array<{ text: string; generatedAt: number }> {
+  const fromArray = Array.isArray(discussion.participations)
+    ? discussion.participations
+        .filter((entry) => Boolean(entry?.text?.trim()))
+        .map((entry) => ({
+          text: entry.text.trim(),
+          generatedAt: entry.generatedAt,
+        }))
+    : []
+  const fromLegacy = discussion.participation?.text?.trim()
+    ? [{
+      text: discussion.participation.text.trim(),
+      generatedAt: discussion.participation.generatedAt,
+    }]
+    : []
+
+  const dedup = new Map<string, { text: string; generatedAt: number }>()
+  ;[...fromArray, ...fromLegacy].forEach((entry) => {
+    const key = `${entry.text}|${entry.generatedAt}`
+    if (!dedup.has(key)) {
+      dedup.set(key, entry)
+    }
+  })
+
+  return Array.from(dedup.values())
+}
+
 function renderMessageRow(message: ChatMessage) {
   const displayName = stripIndexFromUsername(message.username)
 
@@ -203,6 +248,7 @@ export default function Popup() {
   const [selectedDiscussionId, setSelectedDiscussionId] = useState<string>()
   const [selectedSessionId, setSelectedSessionId] = useState<string>()
   const [showOldSessions, setShowOldSessions] = useState(false)
+  const [showHowItWorks, setShowHowItWorks] = useState(false)
   const [sessionSidebarCollapsed, setSessionSidebarCollapsed] = useState(false)
   const [showSettings, setShowSettings] = useState(false)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('sessions')
@@ -212,16 +258,72 @@ export default function Popup() {
   const [contextWindow, setContextWindow] = useState(DEFAULT_MESSAGE_WINDOW)
   const [settingsStatus, setSettingsStatus] = useState('')
   const [showMockError, setShowMockError] = useState(false)
-  const [sessionPendingDelete, setSessionPendingDelete] = useState<SessionRecord | null>(null)
+  const [sessionActionTarget, setSessionActionTarget] = useState<SessionRecord | null>(null)
   const [flowStage, setFlowStage] = useState<AssistantFlowStage>('idle')
   const [capturedContextMessages, setCapturedContextMessages] = useState<ChatMessage[]>([])
   const [capturedContextAt, setCapturedContextAt] = useState<number>()
   const [showCapturedContextModal, setShowCapturedContextModal] = useState(false)
+  const [showEnterConfirm, setShowEnterConfirm] = useState(false)
+  const [uiStateHydrated, setUiStateHydrated] = useState(false)
+  const [previousSuggestedParticipations, setPreviousSuggestedParticipations] = useState<string[]>([])
+  const [previousSuggestedQuestions, setPreviousSuggestedQuestions] = useState<string[]>([])
+  const [isContinuingPreviousDiscussion, setIsContinuingPreviousDiscussion] = useState(false)
   const draftInputRef = useRef<HTMLTextAreaElement | null>(null)
+  const discussionFlowRef = useRef<HTMLDivElement | null>(null)
+  const draftAutofillTimeoutRef = useRef<number | undefined>(undefined)
+  const enterConfirmTimeoutRef = useRef<number | undefined>(undefined)
 
   const showDebugView = import.meta.env.DEV
   const compatibilityKnown = typeof state.activeTabUrl !== 'undefined'
   const unsupportedOnlyView = compatibilityKnown && !state.isCompatibleTarget
+  const isWelcomeScreen = state.sessionRequired && !showOldSessions && !showHowItWorks && !unsupportedOnlyView
+
+  const hydratePopupUiState = async (): Promise<void> => {
+    try {
+      const raw = await chrome.storage.session.get(POPUP_UI_STATE_KEY)
+      const cached = raw[POPUP_UI_STATE_KEY] as PopupUiStateCache | undefined
+      if (!cached || typeof cached !== 'object') {
+        setUiStateHydrated(true)
+        return
+      }
+
+      if (typeof cached.draftText === 'string') {
+        setDraftText(cached.draftText)
+      }
+      if (Array.isArray(cached.previousSuggestedParticipations)) {
+        setPreviousSuggestedParticipations(
+          cached.previousSuggestedParticipations.filter((entry): entry is string => typeof entry === 'string'),
+        )
+      }
+      if (Array.isArray(cached.previousSuggestedQuestions)) {
+        setPreviousSuggestedQuestions(
+          cached.previousSuggestedQuestions.filter((entry): entry is string => typeof entry === 'string'),
+        )
+      }
+      if (typeof cached.isContinuingPreviousDiscussion === 'boolean') {
+        setIsContinuingPreviousDiscussion(cached.isContinuingPreviousDiscussion)
+      }
+      if (Array.isArray(cached.capturedContextMessages)) {
+        setCapturedContextMessages(cached.capturedContextMessages)
+      }
+      if (typeof cached.capturedContextAt === 'number') {
+        setCapturedContextAt(cached.capturedContextAt)
+      }
+      if (
+        cached.flowStage === 'idle' ||
+        cached.flowStage === 'collecting' ||
+        cached.flowStage === 'collected' ||
+        cached.flowStage === 'awaiting-analysis' ||
+        cached.flowStage === 'participating' ||
+        cached.flowStage === 'awaiting-suggestion' ||
+        cached.flowStage === 'awaiting-similar-question'
+      ) {
+        setFlowStage(cached.flowStage)
+      }
+    } finally {
+      setUiStateHydrated(true)
+    }
+  }
 
   const refreshSessionList = (): void => {
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPES.SESSION_LIST })
@@ -250,6 +352,7 @@ export default function Popup() {
         if (snapshot) {
           setState(snapshot)
         }
+        void hydratePopupUiState()
         refreshSessionList()
       })
       .catch(() => {
@@ -257,6 +360,7 @@ export default function Popup() {
           ...previous,
           lastError: 'Unable to connect to extension background worker.',
         }))
+        void hydratePopupUiState()
       })
 
     return () => {
@@ -280,7 +384,18 @@ export default function Popup() {
 
   const discussionsForPanel = resolvedSelectedSession?.discussions ?? []
   const selectedDiscussion = discussionsForPanel.find((entry) => entry.id === selectedDiscussionId)
-  const hasInferredQuestion = discussionsForPanel.length > 0 || Boolean(currentAnalysis?.inferredQuestion)
+  const latestDiscussion = discussionsForPanel.at(-1)
+  const hasPendingQuestion = Boolean(latestDiscussion && capturedContextMessages.length > 0)
+  const previousParticipations = latestDiscussion
+    ? getDiscussionParticipations(latestDiscussion).map((entry) => entry.text)
+    : []
+  const activeQuestionForParticipation = isContinuingPreviousDiscussion
+    ? latestDiscussion?.inferredQuestion
+    : (currentAnalysis?.inferredQuestion ?? latestDiscussion?.inferredQuestion)
+  const activeContextForParticipation = isContinuingPreviousDiscussion
+    ? capturedContextMessages
+    : (currentAnalysis?.contextMessages ?? latestDiscussion?.contextMessages ?? capturedContextMessages)
+  const canParticipateTarget = Boolean(activeQuestionForParticipation)
   const isSelectedSessionEditable =
     Boolean(activeSession?.id) &&
     resolvedSelectedSession?.id === activeSession?.id &&
@@ -292,6 +407,15 @@ export default function Popup() {
   const contextCount = capturedContextMessages.length
   const contextProgress = Math.min(100, Math.round((contextCount / contextTarget) * 100))
   const isContextFull = contextCount >= contextTarget
+  const isWaitingForResponse =
+    flowStage === 'awaiting-analysis' ||
+    flowStage === 'awaiting-suggestion' ||
+    flowStage === 'awaiting-similar-question'
+  const isParticipationInputEnabled =
+    flowStage === 'participating' &&
+    canParticipateTarget &&
+    isSelectedSessionEditable &&
+    !isWaitingForResponse
   const effectiveLastError = showMockError
     ? 'Mock error: Failed to parse 4 messages because chat nodes were malformed.'
     : state.lastError
@@ -306,6 +430,7 @@ export default function Popup() {
     if (activeSession?.id) {
       setSelectedSessionId((prev) => prev ?? activeSession.id)
       setShowOldSessions(false)
+      setShowHowItWorks(false)
     }
   }, [activeSession?.id])
 
@@ -320,7 +445,9 @@ export default function Popup() {
   useEffect(() => {
     void chrome.runtime.sendMessage({ type: MESSAGE_TYPES.SETTINGS_GET })
       .then((response: unknown) => {
-        const typed = response as { contextWindow?: number } | undefined
+        const typed = response as { contextWindow?: number; apiKey?: string; hasApiKey?: boolean } | undefined
+        setSettingsApiKey(typed?.apiKey ?? '')
+        setSettingsHasApiKey(Boolean(typed?.hasApiKey))
         if (typed?.contextWindow && Number.isFinite(typed.contextWindow)) {
           const bounded = Math.max(5, Math.min(200, Math.round(typed.contextWindow)))
           setContextWindow(bounded)
@@ -337,9 +464,128 @@ export default function Popup() {
     }
   }, [isSelectedSessionEditable, flowStage])
 
+  useEffect(() => {
+    if (!uiStateHydrated) {
+      return
+    }
+    if (state.sessionRequired || !isSelectedSessionEditable) {
+      return
+    }
+
+    if (state.isAnalyzing) {
+      setFlowStage('awaiting-analysis')
+      return
+    }
+
+    if (state.isGenerating) {
+      setFlowStage((previous) => (
+        previous === 'awaiting-similar-question'
+          ? 'awaiting-similar-question'
+          : 'awaiting-suggestion'
+      ))
+      return
+    }
+
+    if (hasPendingQuestion) {
+      setFlowStage((previous) => {
+        if (previous === 'collecting' || previous === 'collected') {
+          return previous
+        }
+        return 'participating'
+      })
+      return
+    }
+
+    if (isContinuingPreviousDiscussion) {
+      setFlowStage((previous) => {
+        if (previous === 'collecting' || previous === 'collected') {
+          return previous
+        }
+        return 'participating'
+      })
+      return
+    }
+
+    setFlowStage((previous) => {
+      if (previous === 'collecting' || previous === 'collected') {
+        return previous
+      }
+      return 'idle'
+    })
+  }, [
+    uiStateHydrated,
+    state.sessionRequired,
+    state.isAnalyzing,
+    state.isGenerating,
+    hasPendingQuestion,
+    isContinuingPreviousDiscussion,
+    isSelectedSessionEditable,
+  ])
+
+  useEffect(() => {
+    if (!uiStateHydrated) {
+      return
+    }
+
+    const cache: PopupUiStateCache = {
+      flowStage,
+      capturedContextMessages,
+      capturedContextAt,
+      draftText,
+      previousSuggestedParticipations,
+      previousSuggestedQuestions,
+      isContinuingPreviousDiscussion,
+    }
+
+    void chrome.storage.session.set({
+      [POPUP_UI_STATE_KEY]: cache,
+    })
+  }, [
+    uiStateHydrated,
+    flowStage,
+    capturedContextMessages,
+    capturedContextAt,
+    draftText,
+    previousSuggestedParticipations,
+    previousSuggestedQuestions,
+    isContinuingPreviousDiscussion,
+  ])
+
+  useEffect(() => {
+    const panel = discussionFlowRef.current
+    if (!panel) {
+      return
+    }
+    const animationFrame = window.requestAnimationFrame(() => {
+      panel.scrollTop = panel.scrollHeight
+    })
+    return () => {
+      window.cancelAnimationFrame(animationFrame)
+    }
+  }, [discussionsForPanel.length, flowStage])
+
+  useEffect(() => {
+    return () => {
+      if (draftAutofillTimeoutRef.current !== undefined) {
+        window.clearTimeout(draftAutofillTimeoutRef.current)
+      }
+      if (enterConfirmTimeoutRef.current !== undefined) {
+        window.clearTimeout(enterConfirmTimeoutRef.current)
+      }
+    }
+  }, [])
+
   const assistantStatus = useMemo(() => {
     if (state.lastError) {
       return 'Error'
+    }
+
+    if (flowStage === 'participating') {
+      return 'Participating'
+    }
+
+    if (flowStage === 'collecting') {
+      return 'Collecting context...'
     }
 
     if (state.isAnalyzing) {
@@ -350,16 +596,26 @@ export default function Popup() {
       return 'Generating participation draft...'
     }
 
+    if (state.participation) {
+      return 'Ready'
+    }
+
     if (state.analysis) {
       return 'Analysis ready'
     }
 
     return 'Ready'
-  }, [state.lastError, state.isAnalyzing, state.isGenerating, state.analysis])
+  }, [flowStage, state.lastError, state.isAnalyzing, state.isGenerating, state.analysis])
 
   const assistantStatusClass = useMemo(() => {
     if (state.lastError) {
       return 'error'
+    }
+    if (flowStage === 'participating') {
+      return 'participating'
+    }
+    if (flowStage === 'collecting') {
+      return 'analyzing'
     }
     if (state.isAnalyzing) {
       return 'analyzing'
@@ -367,11 +623,14 @@ export default function Popup() {
     if (state.isGenerating) {
       return 'generating'
     }
+    if (state.participation) {
+      return 'ready'
+    }
     if (state.analysis) {
       return 'analysis-ready'
     }
     return 'ready'
-  }, [state.lastError, state.isAnalyzing, state.isGenerating, state.analysis])
+  }, [flowStage, state.lastError, state.isAnalyzing, state.isGenerating, state.analysis, state.participation])
 
   const sessionHeading = state.sessionRequired
     ? 'No Active Session'
@@ -379,6 +638,9 @@ export default function Popup() {
 
   const onGatherContext = (): void => {
     setFlowStage('collecting')
+    setIsContinuingPreviousDiscussion(false)
+    setPreviousSuggestedParticipations([])
+    setPreviousSuggestedQuestions([])
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.DEBUG_GET_MESSAGES,
       payload: {
@@ -405,14 +667,19 @@ export default function Popup() {
   const onCancelContextFlow = (): void => {
     setCapturedContextMessages([])
     setCapturedContextAt(undefined)
+    setIsContinuingPreviousDiscussion(false)
+    setPreviousSuggestedParticipations([])
+    setPreviousSuggestedQuestions([])
     setFlowStage('idle')
   }
 
   const onProceedWithContext = (): void => {
-    if (capturedContextMessages.length === 0) {
+    if (capturedContextMessages.length === 0 || !settingsHasApiKey) {
       return
     }
 
+    setFlowStage('awaiting-analysis')
+    setIsContinuingPreviousDiscussion(false)
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.ANALYZE_FROM_CONTEXT,
       payload: {
@@ -422,11 +689,27 @@ export default function Popup() {
       },
     }).then(() => {
       setFlowStage('participating')
+      setIsContinuingPreviousDiscussion(false)
       if (activeSession?.id) {
         setSelectedSessionId(activeSession.id)
       }
       refreshSessionList()
+    }).catch((error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error)
+      setDebugActionStatus(`Analyze failed: ${text}`)
+      setFlowStage('collected')
     })
+  }
+
+  const onContinuePreviousDiscussion = (): void => {
+    if (!latestDiscussion?.inferredQuestion || capturedContextMessages.length === 0) {
+      setDebugActionStatus('Continue failed: missing previous question or context.')
+      return
+    }
+    setIsContinuingPreviousDiscussion(true)
+    setPreviousSuggestedParticipations([])
+    setPreviousSuggestedQuestions([])
+    setFlowStage('participating')
   }
 
   const onStartSession = (): void => {
@@ -438,6 +721,7 @@ export default function Popup() {
         setSelectedSessionId(typed.session.id)
       }
       setShowOldSessions(false)
+      setShowHowItWorks(false)
       refreshSessionList()
     })
   }
@@ -475,35 +759,80 @@ export default function Popup() {
   }
 
   const onParticipate = (): void => {
-    const fallback: DiscussionAnalysisResult = {
-      inferredQuestion: 'No inferred question available.',
-      contextMessages: [],
-      capturedAt: Date.now(),
-    }
+    const inferredQuestion = activeQuestionForParticipation ?? 'No inferred question available.'
+    const contextMessages = activeContextForParticipation
 
-    const analysis = currentAnalysis ?? fallback
-
+    setFlowStage('awaiting-suggestion')
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.GENERATE_PARTICIPATION,
       payload: {
-        inferredQuestion: analysis.inferredQuestion,
-        contextMessages: analysis.contextMessages,
+        inferredQuestion,
+        contextMessages,
+        previousSuggestions: previousSuggestedParticipations,
+        previousParticipations,
       },
-    }).then(() => {
-      setFlowStage('idle')
-      setCapturedContextMessages([])
-      setCapturedContextAt(undefined)
-      refreshSessionList()
+    }).then((response: unknown) => {
+      const typed = response as { text?: string; error?: string } | undefined
+      if (typed?.error) {
+        setDebugActionStatus(`Suggestion failed: ${typed.error}`)
+        setFlowStage('participating')
+        return
+      }
+      const generatedSuggestion = (typed?.text ?? '').trim()
+      if (!generatedSuggestion) {
+        setDebugActionStatus('Suggestion failed: empty response.')
+        setFlowStage('participating')
+        return
+      }
+
+      setDraftText(generatedSuggestion)
+      setPreviousSuggestedParticipations((previous) => (
+        previous.includes(generatedSuggestion) ? previous : [...previous, generatedSuggestion]
+      ))
+      void chrome.runtime.sendMessage({
+        type: MESSAGE_TYPES.MANUAL_AUTOFILL_DRAFT,
+        payload: {
+          text: generatedSuggestion,
+        },
+      })
+      setFlowStage('participating')
+      draftInputRef.current?.focus()
+    }).catch((error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error)
+      setDebugActionStatus(`Suggestion failed: ${text}`)
+      setFlowStage('participating')
     })
   }
 
   const onParticipateWithNothing = (): void => {
+    const hasExistingParticipation = Boolean(
+      latestDiscussion && getDiscussionParticipations(latestDiscussion).length > 0,
+    )
+
+    if (hasExistingParticipation) {
+      setDraftText('')
+      clearEnterConfirm()
+      setIsContinuingPreviousDiscussion(false)
+      setPreviousSuggestedParticipations([])
+      setPreviousSuggestedQuestions([])
+      setFlowStage('idle')
+      setCapturedContextMessages([])
+      setCapturedContextAt(undefined)
+      return
+    }
+
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.PARTICIPATE_WITH_TEXT,
       payload: {
         text: 'Nothing to add',
+        autofill: false,
       },
     }).then(() => {
+      setDraftText('')
+      clearEnterConfirm()
+      setIsContinuingPreviousDiscussion(false)
+      setPreviousSuggestedParticipations([])
+      setPreviousSuggestedQuestions([])
       setFlowStage('idle')
       setCapturedContextMessages([])
       setCapturedContextAt(undefined)
@@ -511,8 +840,154 @@ export default function Popup() {
     })
   }
 
-  const onDiscuss = (): void => {
-    draftInputRef.current?.focus()
+  const onDraftTextChange = (value: string): void => {
+    if (!isParticipationInputEnabled) {
+      return
+    }
+
+    setDraftText(value)
+    setShowEnterConfirm(false)
+    if (enterConfirmTimeoutRef.current !== undefined) {
+      window.clearTimeout(enterConfirmTimeoutRef.current)
+    }
+
+    if (!state.isCompatibleTarget || !isSelectedSessionEditable) {
+      return
+    }
+
+    if (draftAutofillTimeoutRef.current !== undefined) {
+      window.clearTimeout(draftAutofillTimeoutRef.current)
+    }
+
+    draftAutofillTimeoutRef.current = window.setTimeout(() => {
+      void chrome.runtime.sendMessage({
+        type: MESSAGE_TYPES.MANUAL_AUTOFILL_DRAFT,
+        payload: {
+          text: value,
+        },
+      })
+    }, 180)
+  }
+
+  const clearEnterConfirm = (): void => {
+    setShowEnterConfirm(false)
+    if (enterConfirmTimeoutRef.current !== undefined) {
+      window.clearTimeout(enterConfirmTimeoutRef.current)
+      enterConfirmTimeoutRef.current = undefined
+    }
+  }
+
+  const armEnterConfirm = (): void => {
+    setShowEnterConfirm(true)
+    if (enterConfirmTimeoutRef.current !== undefined) {
+      window.clearTimeout(enterConfirmTimeoutRef.current)
+    }
+    enterConfirmTimeoutRef.current = window.setTimeout(() => {
+      setShowEnterConfirm(false)
+      enterConfirmTimeoutRef.current = undefined
+    }, 4500)
+  }
+
+  const sendManualDraft = (): void => {
+    const text = draftText.trim()
+    if (!text || !isParticipationInputEnabled) {
+      return
+    }
+
+    clearEnterConfirm()
+    void chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.PARTICIPATE_WITH_TEXT,
+      payload: {
+        text,
+        autofill: true,
+        submit: true,
+      },
+    }).then(() => {
+      setDraftText('')
+      setFlowStage('idle')
+      setIsContinuingPreviousDiscussion(false)
+      setPreviousSuggestedParticipations([])
+      setPreviousSuggestedQuestions([])
+      setCapturedContextMessages([])
+      setCapturedContextAt(undefined)
+      refreshSessionList()
+    }).catch((error: unknown) => {
+      const textError = error instanceof Error ? error.message : String(error)
+      setDebugActionStatus(`Send failed: ${textError}`)
+    })
+  }
+
+  const onDraftKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>): void => {
+    if (event.key === 'Escape') {
+      if (showEnterConfirm) {
+        event.preventDefault()
+        clearEnterConfirm()
+      }
+      return
+    }
+
+    if (event.key !== 'Enter' || event.shiftKey) {
+      return
+    }
+
+    const text = draftText.trim()
+    if (!text || !isParticipationInputEnabled) {
+      return
+    }
+
+    event.preventDefault()
+    if (!showEnterConfirm) {
+      armEnterConfirm()
+      return
+    }
+
+    sendManualDraft()
+  }
+
+  const onGetSimilarQuestion = (): void => {
+    const inferredQuestion = activeQuestionForParticipation ?? 'No inferred question available.'
+    const contextMessages = activeContextForParticipation
+
+    setFlowStage('awaiting-similar-question')
+    void chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.GENERATE_SIMILAR_QUESTION,
+      payload: {
+        inferredQuestion,
+        contextMessages,
+        previousQuestions: previousSuggestedQuestions,
+        previousParticipations,
+      },
+    }).then((response: unknown) => {
+      const typed = response as { text?: string; error?: string } | undefined
+      if (typed?.error) {
+        setDebugActionStatus(`Similar question failed: ${typed.error}`)
+        setFlowStage('participating')
+        return
+      }
+      const generatedQuestion = (typed?.text ?? '').trim()
+      if (!generatedQuestion) {
+        setDebugActionStatus('Similar question failed: empty response.')
+        setFlowStage('participating')
+        return
+      }
+
+      setDraftText(generatedQuestion)
+      setPreviousSuggestedQuestions((previous) => (
+        previous.includes(generatedQuestion) ? previous : [...previous, generatedQuestion]
+      ))
+      void chrome.runtime.sendMessage({
+        type: MESSAGE_TYPES.MANUAL_AUTOFILL_DRAFT,
+        payload: {
+          text: generatedQuestion,
+        },
+      })
+      setFlowStage('participating')
+      draftInputRef.current?.focus()
+    }).catch((error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error)
+      setDebugActionStatus(`Similar question failed: ${text}`)
+      setFlowStage('participating')
+    })
   }
 
   const onOpenDiscussionContext = (discussion: DiscussionRecord): void => {
@@ -573,26 +1048,32 @@ export default function Popup() {
   }
 
   const onViewOldSessions = (): void => {
+    setShowHowItWorks(false)
     setShowOldSessions(true)
     if (!selectedSessionId && sessionsForSidebar.length > 0) {
       setSelectedSessionId(sessionsForSidebar[0].id)
     }
   }
 
-  const onOpenSessionDeleteModal = (event: MouseEvent, session: SessionRecord): void => {
+  const onOpenHowItWorks = (): void => {
+    setShowOldSessions(false)
+    setShowHowItWorks(true)
+  }
+
+  const onOpenSessionActions = (event: MouseEvent, session: SessionRecord): void => {
     event.preventDefault()
     if (session.id === DEV_MOCK_PREVIOUS_SESSION.id) {
       return
     }
-    setSessionPendingDelete(session)
+    setSessionActionTarget(session)
   }
 
   const onDeleteSessionConfirm = (): void => {
-    if (!sessionPendingDelete) {
+    if (!sessionActionTarget) {
       return
     }
 
-    const deletingId = sessionPendingDelete.id
+    const deletingId = sessionActionTarget.id
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.SESSION_DELETE,
       payload: {
@@ -608,7 +1089,7 @@ export default function Popup() {
         setSelectedSessionId(undefined)
         setSelectedDiscussionId(undefined)
       }
-      setSessionPendingDelete(null)
+      setSessionActionTarget(null)
       refreshSessionList()
     }).catch((error: unknown) => {
       const text = error instanceof Error ? error.message : String(error)
@@ -616,9 +1097,38 @@ export default function Popup() {
     })
   }
 
+  const onRestoreSessionConfirm = (): void => {
+    if (!sessionActionTarget) {
+      return
+    }
+
+    const restoreId = sessionActionTarget.id
+    void chrome.runtime.sendMessage({
+      type: MESSAGE_TYPES.SESSION_RESTORE,
+      payload: {
+        sessionId: restoreId,
+      },
+    }).then((response: unknown) => {
+      const typed = response as { success?: boolean; error?: string } | undefined
+      if (typed?.error) {
+        setDebugActionStatus(`Restore failed: ${typed.error}`)
+        return
+      }
+      setSelectedSessionId(restoreId)
+      setSelectedDiscussionId(undefined)
+      setShowOldSessions(false)
+      setSessionActionTarget(null)
+      refreshSessionList()
+    }).catch((error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error)
+      setDebugActionStatus(`Restore failed: ${text}`)
+    })
+  }
+
   const onTitleClick = (): void => {
     if (state.sessionRequired) {
       setShowOldSessions(false)
+      setShowHowItWorks(false)
       setSelectedDiscussionId(undefined)
     }
   }
@@ -772,7 +1282,7 @@ export default function Popup() {
   const popupClassName = [
     'popup-root',
     unsupportedOnlyView ? 'unsupported' : '',
-    state.sessionRequired && !unsupportedOnlyView && !showOldSessions ? 'compact' : '',
+    state.sessionRequired && !unsupportedOnlyView && !showOldSessions && !showHowItWorks ? 'compact' : '',
   ].filter(Boolean).join(' ')
 
   return (
@@ -784,19 +1294,21 @@ export default function Popup() {
             title="End Session"
             onClick={onEndSession}
             type="button"
-            disabled={state.sessionRequired}
+            disabled={state.sessionRequired || unsupportedOnlyView}
           />
           <button
             className="window-btn yellow"
             title="Minimize (Close Popup)"
             onClick={onClosePopup}
             type="button"
+            disabled={unsupportedOnlyView}
           />
           <button
             className="window-btn green"
             title="End Current and Start New Session"
             onClick={onRestartSession}
             type="button"
+            disabled={unsupportedOnlyView}
           />
           {showDebugView ? (
             <div className="view-toggle-mini view-toggle-controls">
@@ -830,15 +1342,27 @@ export default function Popup() {
             </button>
           ) : null}
         </div>
-        <button
-          className="settings-toggle-btn"
-          onClick={onOpenSettings}
-          type="button"
-          title="Settings"
-          aria-label="Open settings"
-        >
-          ⚙
-        </button>
+        <div className="window-side-controls">
+          <button
+            className="settings-toggle-btn"
+            onClick={onOpenHowItWorks}
+            type="button"
+            title="How it works"
+            aria-label="Open how it works"
+          >
+            ?
+          </button>
+          <button
+            className="settings-toggle-btn"
+            onClick={onOpenSettings}
+            type="button"
+            title="Settings"
+            aria-label="Open settings"
+            disabled={unsupportedOnlyView}
+          >
+            ⚙
+          </button>
+        </div>
       </div>
 
       <header className="popup-header">
@@ -856,14 +1380,16 @@ export default function Popup() {
                   Discussion.IO
                 </button>
               </h1>
-              <div className="session-status-inline">
-                <span
-                  className={`status-dot ${assistantStatusClass} custom-tooltip-trigger`}
-                  data-tooltip={assistantStatus}
-                  aria-label={assistantStatus}
-                />
-                <small className="session-chip session-title-main">{sessionHeading}</small>
-              </div>
+              {!isWelcomeScreen && !showHowItWorks ? (
+                <div className="session-status-inline">
+                  <span
+                    className={`status-dot ${assistantStatusClass} custom-tooltip-trigger`}
+                    data-tooltip={assistantStatus}
+                    aria-label={assistantStatus}
+                  />
+                  <small className="session-chip session-title-main">{sessionHeading}</small>
+                </div>
+              ) : null}
             </div>
           </>
         )}
@@ -883,9 +1409,79 @@ export default function Popup() {
       ) : (
         <>
           {(!showDebugView || viewMode === 'assistant') ? (
-            <section className="stack">
+            <section className={`stack ${isWelcomeScreen ? 'welcome-stack' : ''}`}>
               {state.sessionRequired ? (
-                showOldSessions ? (
+                showHowItWorks ? (
+                  <section className="card how-it-works-card">
+                    <div className="how-it-works-header">
+                      <div>
+                        <h2>How Discussion.IO Works</h2>
+                        <p className="how-it-works-subtitle">
+                          A practical flow from context capture to final participation.
+                        </p>
+                      </div>
+                      <button
+                        className="mini-btn how-it-works-back-btn"
+                        onClick={() => setShowHowItWorks(false)}
+                        type="button"
+                      >
+                        Back
+                      </button>
+                    </div>
+
+                    <div className="how-it-works-content">
+                      <section className="how-it-works-section">
+                        <h3>Sessions</h3>
+                        <p>
+                          Start each class as a separate session. Sessions store all inferred discussion questions,
+                          captured context, and every participation you sent from the extension.
+                        </p>
+                        <ul>
+                          <li>Create a new session from the welcome screen.</li>
+                          <li>Reopen old sessions to review discussion history.</li>
+                          <li>Restore any old session as active from the sessions list context menu.</li>
+                        </ul>
+                      </section>
+
+                      <section className="how-it-works-section">
+                        <h3>Discussions</h3>
+                        <p>
+                          Click Analyze to collect the latest context messages from BBB chat, then choose whether to
+                          proceed as a new discussion or continue the previous one.
+                        </p>
+                        <ul>
+                          <li>Proceed to create the inferred question from the captured context.</li>
+                          <li>Continue previous discussion to keep working on the latest inferred question.</li>
+                          <li>Use participation actions to send your own text, request a suggestion, or ask a similar question.</li>
+                        </ul>
+                        <p>
+                          Clicking a question bubble opens the exact context messages that were used for that discussion.
+                        </p>
+                      </section>
+
+                      <section className="how-it-works-section">
+                        <h3>Settings</h3>
+                        <p>
+                          Configure AI and data controls inside Settings. Your data is kept in local extension storage.
+                        </p>
+                        <ul>
+                          <li>AI tab: save or remove your OpenAI API key.</li>
+                          <li>Context tab: set how many chat messages are captured for analysis.</li>
+                          <li>Sessions tab: download all sessions JSON or clear stored history.</li>
+                        </ul>
+                      </section>
+
+                      <section className="how-it-works-section">
+                        <h3>Interaction Notes</h3>
+                        <ul>
+                          <li>The extension autofills BBB chat input but does not auto-send.</li>
+                          <li>Press Enter twice in the extension input to confirm and send.</li>
+                          <li>Unsupported pages show an incompatibility warning and disable controls.</li>
+                        </ul>
+                      </section>
+                    </div>
+                  </section>
+                ) : showOldSessions ? (
                   <section className={`assistant-shell ${sessionSidebarCollapsed ? 'sidebar-collapsed' : ''}`}>
                     <aside className="session-sidebar">
                       <div className="session-sidebar-header">
@@ -908,6 +1504,7 @@ export default function Popup() {
                               <li
                                 key={session.id}
                                 className={`session-row ${resolvedSelectedSession?.id === session.id ? 'selected' : ''}`}
+                                onContextMenu={(event) => onOpenSessionActions(event, session)}
                               >
                                 <button
                                   className="session-select-btn"
@@ -949,10 +1546,17 @@ export default function Popup() {
                               >
                                 {discussion.inferredQuestion}
                               </button>
-                              <div className="bubble bubble-user">
-                                {discussion.participation?.text ?? 'No participation.'}
-                              </div>
-                              <small className="bubble-time-hover">{formatTimeOnly(discussion.createdAt)}</small>
+                              {getDiscussionParticipations(discussion).map((participation, index) => (
+                                <div
+                                  key={`${discussion.id}-participation-${participation.generatedAt}-${index}`}
+                                  className="discussion-participation-item"
+                                >
+                                  <div className="bubble bubble-user">
+                                    {participation.text}
+                                  </div>
+                                  <small className="bubble-time-hover">{formatTimeOnly(participation.generatedAt)}</small>
+                                </div>
+                              ))}
                             </article>
                           ))
                         )}
@@ -970,19 +1574,50 @@ export default function Popup() {
                   </section>
                 ) : (
                   <section className="card session-gate">
-                    <p>Choose an action.</p>
-                    <div className="session-gate-actions">
-                      <button className="session-gate-btn" onClick={onStartSession} type="button">
-                        Create New Session
-                      </button>
-                      <button
-                        className="session-gate-btn"
-                        onClick={onViewOldSessions}
-                        type="button"
-                      >
-                        View Old Sessions
-                      </button>
+                    <h2>Welcome</h2>
+                    <p className="session-gate-description">
+                      Discussion.IO helps you participate in live class discussions with less friction.
+                      Capture recent chat context, infer the professor question, and draft strong responses fast.
+                      You can submit your own message, request multiple suggestions, or continue a previous discussion.
+                    </p>
+                    <div className="session-gate-actions-icon">
+                      <div className="session-gate-option">
+                        <button
+                          className="session-gate-icon-btn custom-tooltip-trigger"
+                          data-tooltip="Create New Session"
+                          aria-label="Create New Session"
+                          onClick={onStartSession}
+                          type="button"
+                        >
+                          <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                        <small>New Session</small>
+                      </div>
+                      <div className="session-gate-option">
+                        <button
+                          className="session-gate-icon-btn custom-tooltip-trigger"
+                          data-tooltip="View Old Sessions"
+                          aria-label="View Old Sessions"
+                          onClick={onViewOldSessions}
+                          type="button"
+                        >
+                          <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                            <path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                          </svg>
+                        </button>
+                        <small>Old Sessions</small>
+                      </div>
                     </div>
+                    <button
+                      className="mini-btn session-gate-docs-btn"
+                      onClick={onOpenHowItWorks}
+                      type="button"
+                    >
+                      How It Works
+                    </button>
+                    <small className="session-gate-footer">Adstarct 2026 ©</small>
                   </section>
                 )
               ) : (
@@ -1008,7 +1643,7 @@ export default function Popup() {
                             <li
                               key={session.id}
                               className={`session-row ${resolvedSelectedSession?.id === session.id ? 'selected' : ''}`}
-                              onContextMenu={(event) => onOpenSessionDeleteModal(event, session)}
+                              onContextMenu={(event) => onOpenSessionActions(event, session)}
                             >
                               <button
                                 className="session-select-btn"
@@ -1018,7 +1653,12 @@ export default function Popup() {
                                 }}
                                 type="button"
                               >
-                                <strong>{getSessionListTitle(session)}</strong>
+                                <div className="session-title-row">
+                                  <strong>{getSessionListTitle(session)}</strong>
+                                  {session.id === activeSession?.id && activeSession?.status === 'active' ? (
+                                    <span className="session-active-dot" aria-label="Active session" title="Active session" />
+                                  ) : null}
+                                </div>
                                 <div className="session-row-footer">
                                   <small
                                     className="session-row-count"
@@ -1044,7 +1684,7 @@ export default function Popup() {
                       </section>
                     ) : null}
 
-                    <div className="discussion-flow">
+                    <div className="discussion-flow" ref={discussionFlowRef}>
                       {discussionsForPanel.length === 0 ? (
                         <p className="muted empty-discussions-hint">{emptyDiscussionsMessage}</p>
                       ) : (
@@ -1057,13 +1697,53 @@ export default function Popup() {
                             >
                               {discussion.inferredQuestion}
                             </button>
-                            <div className="bubble bubble-user">
-                              {discussion.participation?.text ?? 'No participation yet.'}
-                            </div>
-                            <small className="bubble-time-hover">{formatTimeOnly(discussion.createdAt)}</small>
+                            {getDiscussionParticipations(discussion).map((participation, index) => (
+                              <div
+                                key={`${discussion.id}-participation-${participation.generatedAt}-${index}`}
+                                className="discussion-participation-item"
+                              >
+                                <div className="bubble bubble-user">
+                                  {participation.text}
+                                </div>
+                                <small className="bubble-time-hover">{formatTimeOnly(participation.generatedAt)}</small>
+                              </div>
+                            ))}
                           </article>
                         ))
                       )}
+                      {flowStage === 'awaiting-analysis' ? (
+                        <article className="discussion-entry">
+                          <div
+                            className="bubble bubble-question bubble-question-pending"
+                            role="status"
+                            aria-label="Waiting for inferred question"
+                          >
+                            &nbsp;
+                          </div>
+                        </article>
+                      ) : null}
+                      {flowStage === 'awaiting-similar-question' ? (
+                        <article className="discussion-entry">
+                          <div
+                            className="bubble bubble-user bubble-user-pending"
+                            role="status"
+                            aria-label="Waiting for similar question"
+                          >
+                            &nbsp;
+                          </div>
+                        </article>
+                      ) : null}
+                      {flowStage === 'awaiting-suggestion' ? (
+                        <article className="discussion-entry">
+                          <div
+                            className="bubble bubble-user bubble-user-pending"
+                            role="status"
+                            aria-label="Waiting for suggestion"
+                          >
+                            &nbsp;
+                          </div>
+                        </article>
+                      ) : null}
                     </div>
 
                     <section className="chat-island">
@@ -1071,15 +1751,23 @@ export default function Popup() {
                         <textarea
                           ref={draftInputRef}
                           value={draftText}
-                          onChange={(event) => setDraftText(event.target.value)}
+                          onChange={(event) => onDraftTextChange(event.target.value)}
+                          onKeyDown={onDraftKeyDown}
                           placeholder={isSelectedSessionEditable
-                            ? (hasInferredQuestion
-                              ? 'Write your participation message here...'
-                              : 'Analyze discussion first to unlock input.')
+                            ? (flowStage === 'participating'
+                              ? (canParticipateTarget
+                                ? 'Write your participation message here...'
+                                : 'No open question to answer.')
+                              : 'Choose a participation action first.')
                             : 'This session is read-only.'}
                           rows={2}
-                          disabled={!hasInferredQuestion || !isSelectedSessionEditable}
+                          disabled={!isParticipationInputEnabled}
                         />
+                        {showEnterConfirm ? (
+                          <div className="enter-confirm-popup" role="status">
+                            Press Enter again to confirm. Press Esc to cancel.
+                          </div>
+                        ) : null}
                         <div className="flow-actions-panel">
                           {flowStage === 'idle' ? (
                             <div className="flow-icon-stack">
@@ -1108,7 +1796,7 @@ export default function Popup() {
                             </div>
                           ) : null}
                           {flowStage === 'collected' ? (
-                            <div className="flow-icon-row">
+                            <div className="flow-icon-row flow-icon-triple">
                               <button className="flow-icon-btn custom-tooltip-trigger" data-tooltip="Cancel" aria-label="Cancel" onClick={onCancelContextFlow} type="button">
                                 <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
                                   <line x1="6" y1="6" x2="18" y2="18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
@@ -1116,12 +1804,42 @@ export default function Popup() {
                                 </svg>
                               </button>
                               <button
-                                className="flow-icon-btn custom-tooltip-trigger"
-                                data-tooltip={isContextFull ? 'Proceed' : 'Proceed Partly'}
-                                aria-label={isContextFull ? 'Proceed' : 'Proceed Partly'}
+                                className="flow-icon-btn custom-tooltip-trigger tooltip-multiline"
+                                data-tooltip={settingsHasApiKey ? (isContextFull ? 'Proceed to New\nDiscussion' : 'Proceed Partly to New\nDiscussion') : 'Add OpenAI API key\nin Settings'}
+                                data-tooltip-pos="top"
+                                aria-label={settingsHasApiKey ? (isContextFull ? 'Proceed to New Discussion' : 'Proceed Partly to New Discussion') : 'Add OpenAI API key in Settings'}
                                 onClick={onProceedWithContext}
                                 type="button"
-                                disabled={contextCount === 0}
+                                disabled={contextCount === 0 || !settingsHasApiKey}
+                              >
+                                <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                  <path d="M5 12h12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <path d="M13 7l5 5-5 5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+                              <button
+                                className="flow-icon-btn custom-tooltip-trigger tooltip-multiline"
+                                data-tooltip={'Continue Previous\nDiscussion'}
+                                aria-label="Continue Previous Discussion"
+                                onClick={onContinuePreviousDiscussion}
+                                type="button"
+                                disabled={contextCount === 0 || !latestDiscussion?.inferredQuestion}
+                              >
+                                <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                  <path d="M9 8H5v4" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                  <path d="M5 12a7 7 0 1 0 2-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+                            </div>
+                          ) : null}
+                          {flowStage === 'awaiting-analysis' ? (
+                            <div className="flow-icon-row">
+                              <button
+                                className="flow-icon-btn custom-tooltip-trigger collecting"
+                                data-tooltip="Waiting for response"
+                                aria-label="Waiting for response"
+                                type="button"
+                                disabled
                               >
                                 <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
                                   <path d="M5 12h12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
@@ -1138,15 +1856,48 @@ export default function Popup() {
                                   <line x1="18" y1="6" x2="6" y2="18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
                                 </svg>
                               </button>
-                              <button className="flow-icon-btn custom-tooltip-trigger" data-tooltip="Discuss" aria-label="Discuss" onClick={onDiscuss} type="button">
+                              <button className="flow-icon-btn custom-tooltip-trigger tooltip-multiline" data-tooltip={'Get Similar\nQuestion'} aria-label="Get Similar Question" onClick={onGetSimilarQuestion} type="button">
                                 <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
-                                  <rect x="4" y="5" width="16" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="2" />
-                                  <path d="M8 19l3-3h5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                  <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+                                  <path d="M9.4 9.3a2.6 2.6 0 1 1 4.2 2.1c-.9.7-1.4 1.1-1.4 2" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <circle cx="12" cy="17" r="1" fill="currentColor" />
                                 </svg>
                               </button>
-                              <button className="flow-icon-btn custom-tooltip-trigger" data-tooltip="Give Suggestion" aria-label="Give Suggestion" onClick={onParticipate} type="button">
+                              <button className="flow-icon-btn custom-tooltip-trigger tooltip-multiline" data-tooltip={'Get\nSuggestion'} aria-label="Get Suggestion" onClick={onParticipate} type="button">
                                 <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
                                   <path d="M6 12L20 4L14 20L11 13L6 12Z" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+                            </div>
+                          ) : null}
+                          {flowStage === 'awaiting-suggestion' ? (
+                            <div className="flow-icon-row">
+                              <button
+                                className="flow-icon-btn custom-tooltip-trigger collecting"
+                                data-tooltip="Generating suggestion"
+                                aria-label="Generating suggestion"
+                                type="button"
+                                disabled
+                              >
+                                <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                  <path d="M6 12L20 4L14 20L11 13L6 12Z" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                                </svg>
+                              </button>
+                            </div>
+                          ) : null}
+                          {flowStage === 'awaiting-similar-question' ? (
+                            <div className="flow-icon-row">
+                              <button
+                                className="flow-icon-btn custom-tooltip-trigger collecting"
+                                data-tooltip="Generating similar question"
+                                aria-label="Generating similar question"
+                                type="button"
+                                disabled
+                              >
+                                <svg className="icon-glyph" viewBox="0 0 24 24" aria-hidden="true">
+                                  <circle cx="12" cy="12" r="8" fill="none" stroke="currentColor" strokeWidth="2" />
+                                  <path d="M9.4 9.3a2.6 2.6 0 1 1 4.2 2.1c-.9.7-1.4 1.1-1.4 2" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                                  <circle cx="12" cy="17" r="1" fill="currentColor" />
                                 </svg>
                               </button>
                             </div>
@@ -1273,19 +2024,27 @@ export default function Popup() {
         </div>
       ) : null}
 
-      {sessionPendingDelete ? (
-        <div className="modal-backdrop" onClick={() => setSessionPendingDelete(null)}>
+      {sessionActionTarget ? (
+        <div className="modal-backdrop" onClick={() => setSessionActionTarget(null)}>
           <div className="modal-card" onClick={(event) => event.stopPropagation()}>
             <div className="section-header">
-              <h2>Delete Session</h2>
+              <h2>Session Actions</h2>
             </div>
-            <p className="muted">Delete "{sessionPendingDelete.name}" and all its discussions?</p>
+            <p className="muted">Session: "{sessionActionTarget.name}"</p>
             <div className="confirm-actions">
-              <button className="ghost-btn" type="button" onClick={() => setSessionPendingDelete(null)}>
-                No
+              <button
+                className="ghost-btn"
+                type="button"
+                onClick={onRestoreSessionConfirm}
+                disabled={sessionActionTarget.id === activeSession?.id && activeSession?.status === 'active'}
+              >
+                Restore
               </button>
               <button className="settings-danger-btn" type="button" onClick={onDeleteSessionConfirm}>
-                Yes
+                Delete
+              </button>
+              <button className="ghost-btn" type="button" onClick={() => setSessionActionTarget(null)}>
+                Cancel
               </button>
             </div>
           </div>

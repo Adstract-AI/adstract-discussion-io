@@ -30,7 +30,46 @@ function setInputValue(input: HTMLTextAreaElement | HTMLInputElement, value: str
   }
 }
 
-function autofillText(text: string): AutofillTextResult {
+function findSendButtonNearInput(input: HTMLTextAreaElement | HTMLInputElement): HTMLButtonElement | null {
+  const root = input.closest('[class*="input" i], [class*="footer" i], [class*="chat" i]') ?? input.parentElement ?? document.body
+  const localCandidates = [
+    'button[class*="sendButton--"]',
+    'button[class*="buttonWrapper--"][class*="send"]',
+    'button[aria-label*="send" i]',
+    'button[title*="send" i]',
+  ]
+
+  for (const selector of localCandidates) {
+    const button = root.querySelector(selector)
+    if (button instanceof HTMLButtonElement) {
+      return button
+    }
+  }
+
+  for (const selector of localCandidates) {
+    const button = document.querySelector(selector)
+    if (button instanceof HTMLButtonElement) {
+      return button
+    }
+  }
+
+  return null
+}
+
+function trySubmit(input: HTMLTextAreaElement | HTMLInputElement): AutofillTextResult | null {
+  const sendButton = findSendButtonNearInput(input)
+  if (!sendButton) {
+    return {
+      success: false,
+      error: 'Chat send button not found.',
+    }
+  }
+
+  sendButton.click()
+  return null
+}
+
+function autofillText(text: string, submit = false): AutofillTextResult {
   const input = findChatInput(document)
   if (!input) {
     return {
@@ -43,6 +82,13 @@ function autofillText(text: string): AutofillTextResult {
   input.dispatchEvent(new Event('input', { bubbles: true }))
   input.dispatchEvent(new Event('change', { bubbles: true }))
   input.focus()
+
+  if (submit) {
+    const submitResult = trySubmit(input)
+    if (submitResult) {
+      return submitResult
+    }
+  }
 
   return { success: true }
 }
@@ -108,7 +154,7 @@ function handleRuntimeMessage(
 
   if (isAutofillMessage(typed)) {
     log('AUTOFILL_TEXT requested by background')
-    sendResponse(autofillText(typed.payload.text))
+    sendResponse(autofillText(typed.payload.text, typed.payload.submit === true))
     return
   }
 
