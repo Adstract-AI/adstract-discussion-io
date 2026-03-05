@@ -1,6 +1,6 @@
 <h1 style="display:flex;align-items:center;gap:12px;">
-  <img src="./public/discuss-io-logo.png" alt="Discussion.IO Logo" width="56" />
-  <span>Discussion.IO (Adstract Discussion Assistant)</span>
+  <img src="./public/discuss-io-logo.png" alt="Discussion.IO Logo" width="40" />
+  <span>Discussion.IO</span>
 </h1>
 
 Discussion.IO is a Chrome Extension (Manifest V3) for helping students participate in live BigBlueButton discussions.
