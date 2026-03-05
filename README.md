@@ -1,4 +1,7 @@
-# Discussion.IO (Adstract Discussion Assistant)
+<h1 style="display:flex;align-items:center;gap:12px;">
+  <img src="./public/discuss-io-logo.png" alt="Discussion.IO Logo" width="56" />
+  <span>Discussion.IO (Adstract Discussion Assistant)</span>
+</h1>
 
 Discussion.IO is a Chrome Extension (Manifest V3) for helping students participate in live BigBlueButton discussions.
 
@@ -16,6 +19,10 @@ This tool is built for educational support during live class discussions:
 It is not a tool for academic misconduct. Users are responsible for using it according to institutional policies.
 
 ## Who Is Behind This
+
+<p align="left">
+  <img src="./public/adstract-logo.png" alt="Adstract Logo" width="150" />
+</p>
 
 Discussion.IO is an experimental project by **Adstract**.
 
