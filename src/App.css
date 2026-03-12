@@ -1746,3 +1746,78 @@ textarea:disabled {
   color: #e2e8f0;
   word-break: break-all;
 }
+
+.popup-root.theme-light {
+  --surface-border-subtle: rgba(15, 23, 42, 0.16);
+  color: #0f172a;
+  background: #f4f6f8;
+}
+
+.popup-root.theme-light .card,
+.popup-root.theme-light .session-sidebar,
+.popup-root.theme-light .discussion-pane,
+.popup-root.theme-light .chat-island,
+.popup-root.theme-light .modal-card,
+.popup-root.theme-light .history-only-island,
+.popup-root.theme-light .how-it-works-section,
+.popup-root.theme-light .terms-content,
+.popup-root.theme-light .settings-key-preview,
+.popup-root.theme-light .session-row,
+.popup-root.theme-light .message-row,
+.popup-root.theme-light .enter-confirm-popup {
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.popup-root.theme-light .popup-header h1,
+.popup-root.theme-light .card h2,
+.popup-root.theme-light .section-header h2,
+.popup-root.theme-light strong {
+  color: #0f172a;
+}
+
+.popup-root.theme-light .muted,
+.popup-root.theme-light .card p,
+.popup-root.theme-light small,
+.popup-root.theme-light .message-row-time,
+.popup-root.theme-light .settings-note {
+  color: #475569;
+}
+
+.popup-root.theme-light .bubble-user {
+  background: #f8fafc;
+  color: #0f172a;
+}
+
+.popup-root.theme-light .bubble-question {
+  background: #dbeafe;
+  color: #1e3a8a;
+}
+
+.popup-root.theme-light textarea,
+.popup-root.theme-light input,
+.popup-root.theme-light select {
+  background: #ffffff;
+  color: #0f172a;
+  border-color: rgba(15, 23, 42, 0.18);
+}
+
+.popup-root.theme-light .mini-btn,
+.popup-root.theme-light .session-gate-icon-btn,
+.popup-root.theme-light .flow-icon-btn,
+.popup-root.theme-light .history-icon-btn,
+.popup-root.theme-light .settings-tab-btn.active,
+.popup-root.theme-light .settings-tab-btn:hover {
+  background: #e2e8f0;
+  color: #0f172a;
+}
+
+.popup-root.theme-light .settings-toggle-btn:hover,
+.popup-root.theme-light .mini-tab:hover,
+.popup-root.theme-light .dev-mock-error-btn:hover {
+  background: #e2e8f0;
+}
+
+.popup-root.theme-light .settings-tab-btn {
+  color: #334155;
+}

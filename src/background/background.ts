@@ -36,10 +36,7 @@ const STATE_STORAGE_KEY = 'discussionAssistantManualState'
 const OPENAI_API_KEY_STORAGE_KEY = 'discussionAssistantOpenAIApiKey'
 const CONTEXT_WINDOW_STORAGE_KEY = 'discussionAssistantContextWindow'
 const AI_CONFIG_STORAGE_KEY = 'discussionAssistantAiConfigV1'
-const ALLOWED_BBB_HOSTS = new Set([
-  'bbb-23.finki.ukim.mk',
-  'bbb-24.finki.ukim.mk',
-])
+const ALLOWED_BBB_HOST_PATTERN = /^bbb-\d+\.finki\.ukim\.mk$/i
 const ALLOWED_AI_MODELS: readonly AiModel[] = ['gpt-5.2', 'gpt-5.3-chat-latest', 'gpt-5-mini', 'gpt-5-nano']
 const ALLOWED_LANGUAGES: readonly AgentLanguage[] = ['English', 'Macedonian']
 
@@ -290,7 +287,7 @@ function isBbbUrl(url: string | undefined): boolean {
 
   try {
     const parsed = new URL(url)
-    return ALLOWED_BBB_HOSTS.has(parsed.hostname) && parsed.pathname.startsWith('/html5client/join')
+    return ALLOWED_BBB_HOST_PATTERN.test(parsed.hostname) && parsed.pathname.startsWith('/html5client/join')
   } catch {
     return false
   }

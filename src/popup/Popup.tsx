@@ -18,6 +18,7 @@ const DEFAULT_MESSAGE_WINDOW = 20
 const DEV_MOCK_BASE = Date.now() - 1000 * 60 * 60
 const POPUP_UI_STATE_KEY = 'discussionAssistantPopupUiStateV1'
 const TERMS_ACCEPTED_KEY = 'discussionAssistantTermsAcceptedV1'
+const THEME_MODE_STORAGE_KEY = 'discussionAssistantThemeModeV1'
 const AI_MODEL_OPTIONS: ReadonlyArray<{ value: AiModel; label: string }> = [
   { value: 'gpt-5.2', label: 'GPT-5.2' },
   { value: 'gpt-5.3-chat-latest', label: 'GPT-5.3 Chat Latest' },
@@ -34,8 +35,9 @@ const DEFAULT_PROMPT_SEMANTICS: PromptSemantics = {
 
 type ViewMode = 'assistant' | 'debug'
 type AssistantFlowStage = 'idle' | 'collecting' | 'collected' | 'awaiting-analysis' | 'participating' | 'awaiting-suggestion' | 'awaiting-similar-question'
-type SettingsTab = 'sessions' | 'ai' | 'context'
+type SettingsTab = 'general' | 'sessions' | 'ai' | 'context'
 type LegalTab = 'terms' | 'privacy'
+type ThemeMode = 'dark' | 'light'
 type PendingTermsAction =
   | { type: 'start' }
   | { type: 'restore'; sessionId: string }
@@ -375,7 +377,9 @@ export default function Popup() {
   const [legalTab, setLegalTab] = useState<LegalTab>('terms')
   const [hasAcceptedTerms, setHasAcceptedTerms] = useState(false)
   const [pendingTermsAction, setPendingTermsAction] = useState<PendingTermsAction>(null)
-  const [settingsTab, setSettingsTab] = useState<SettingsTab>('sessions')
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('general')
+  const [themeMode, setThemeMode] = useState<ThemeMode>('dark')
+  const [settingsThemeMode, setSettingsThemeMode] = useState<ThemeMode>('dark')
   const [settingsApiKey, setSettingsApiKey] = useState('')
   const [settingsHasApiKey, setSettingsHasApiKey] = useState(false)
   const [settingsAiModel, setSettingsAiModel] = useState<AiModel>('gpt-5-mini')
@@ -612,6 +616,20 @@ export default function Popup() {
       })
       .catch(() => {
         setHasAcceptedTerms(false)
+      })
+  }, [])
+
+  useEffect(() => {
+    void chrome.storage.local.get(THEME_MODE_STORAGE_KEY)
+      .then((raw: Record<string, unknown>) => {
+        const value = raw[THEME_MODE_STORAGE_KEY]
+        const resolved: ThemeMode = value === 'light' ? 'light' : 'dark'
+        setThemeMode(resolved)
+        setSettingsThemeMode(resolved)
+      })
+      .catch(() => {
+        setThemeMode('dark')
+        setSettingsThemeMode('dark')
       })
   }, [])
 
@@ -1422,8 +1440,9 @@ export default function Popup() {
 
   const onOpenSettings = (): void => {
     setShowSettings(true)
-    setSettingsTab('sessions')
+    setSettingsTab('general')
     setSettingsStatus('')
+    setSettingsThemeMode(themeMode)
     void chrome.runtime.sendMessage({
       type: MESSAGE_TYPES.SETTINGS_GET,
     }).then((response: unknown) => {
@@ -1461,6 +1480,20 @@ export default function Popup() {
           similarQuestion: typed.promptSemantics.similarQuestion?.trim() || DEFAULT_PROMPT_SEMANTICS.similarQuestion,
         })
       }
+    })
+  }
+
+  const onSaveThemeMode = (): void => {
+    const resolved: ThemeMode = settingsThemeMode === 'light' ? 'light' : 'dark'
+    void chrome.storage.local.set({
+      [THEME_MODE_STORAGE_KEY]: resolved,
+    }).then(() => {
+      setThemeMode(resolved)
+      setSettingsThemeMode(resolved)
+      setSettingsStatus(`Theme set to ${resolved === 'light' ? 'white' : 'dark'} mode.`)
+    }).catch((error: unknown) => {
+      const text = error instanceof Error ? error.message : String(error)
+      setSettingsStatus(`Theme save failed: ${text}`)
     })
   }
 
@@ -1600,6 +1633,7 @@ export default function Popup() {
 
   const popupClassName = [
     'popup-root',
+    themeMode === 'light' ? 'theme-light' : '',
     unsupportedOnlyView ? 'unsupported' : '',
     isWelcomeScreen ? 'welcome-mode' : '',
   ].filter(Boolean).join(' ')
@@ -1763,8 +1797,7 @@ export default function Popup() {
             <p>
               This extension works only on the BBB join pages below.
             </p>
-            <small><code>bbb-23.finki.ukim.mk/html5client/join</code></small>
-            <small><code>bbb-24.finki.ukim.mk/html5client/join</code></small>
+            <small><code>{'bbb-{number}.finki.ukim.mk/html5client/join'}</code></small>
           </section>
         </section>
       ) : (
@@ -2561,6 +2594,13 @@ export default function Popup() {
               <aside className="settings-tabs">
                 <button
                   type="button"
+                  className={`settings-tab-btn ${settingsTab === 'general' ? 'active' : ''}`}
+                  onClick={() => setSettingsTab('general')}
+                >
+                  General
+                </button>
+                <button
+                  type="button"
                   className={`settings-tab-btn ${settingsTab === 'sessions' ? 'active' : ''}`}
                   onClick={() => setSettingsTab('sessions')}
                 >
@@ -2582,7 +2622,27 @@ export default function Popup() {
                 </button>
               </aside>
               <section className="settings-panel">
-                {settingsTab === 'sessions' ? (
+                {settingsTab === 'general' ? (
+                  <>
+                    <p className="muted settings-note">General popup preferences.</p>
+                    <div className="settings-field">
+                      <label htmlFor="theme-mode-select">Theme mode</label>
+                      <select
+                        id="theme-mode-select"
+                        value={settingsThemeMode}
+                        onChange={(event) => setSettingsThemeMode(event.target.value as ThemeMode)}
+                      >
+                        <option value="dark">Dark</option>
+                        <option value="light">White</option>
+                      </select>
+                    </div>
+                    <div className="settings-actions">
+                      <button onClick={onSaveThemeMode} type="button">
+                        Save Theme
+                      </button>
+                    </div>
+                  </>
+                ) : settingsTab === 'sessions' ? (
                   <>
                     <p className="muted settings-note">Manage local session history.</p>
                     <div className="settings-actions">

@@ -5,8 +5,7 @@
   "version": "0.1.0",
   "permissions": ["storage", "activeTab", "scripting"],
   "host_permissions": [
-    "https://bbb-23.finki.ukim.mk/html5client/join*",
-    "https://bbb-24.finki.ukim.mk/html5client/join*",
+    "https://*.finki.ukim.mk/html5client/join*",
     "https://api.openai.com/*"
   ],
   "background": {
@@ -16,8 +15,7 @@
   "content_scripts": [
     {
       "matches": [
-        "https://bbb-23.finki.ukim.mk/html5client/join*",
-        "https://bbb-24.finki.ukim.mk/html5client/join*"
+        "https://*.finki.ukim.mk/html5client/join*"
       ],
       "js": ["src/content/content.ts"],
       "run_at": "document_idle"
