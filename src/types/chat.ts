@@ -21,6 +21,10 @@ export interface DebugGetMessagesRequest {
   limit: number
 }
 
+export interface ContentDebugLogRequest {
+  message: string
+}
+
 export interface DiscussionAnalysisResult {
   inferredQuestion: string
   contextMessages: ChatMessage[]
@@ -165,6 +169,7 @@ export interface RuntimeMessageMap {
   ANALYZE_DISCUSSION: DiscussionAnalysisRequest
   ANALYZE_FROM_CONTEXT: AnalyzeFromContextRequest
   DEBUG_GET_MESSAGES: DebugGetMessagesRequest
+  CONTENT_DEBUG_LOG: ContentDebugLogRequest
   DEBUG_CLEAR_MESSAGES: undefined
   DEBUG_CLEAR_LOGS: undefined
   GENERATE_PARTICIPATION: ParticipationRequest
@@ -201,6 +206,7 @@ export const MESSAGE_TYPES = {
   ANALYZE_DISCUSSION: 'ANALYZE_DISCUSSION',
   ANALYZE_FROM_CONTEXT: 'ANALYZE_FROM_CONTEXT',
   DEBUG_GET_MESSAGES: 'DEBUG_GET_MESSAGES',
+  CONTENT_DEBUG_LOG: 'CONTENT_DEBUG_LOG',
   DEBUG_CLEAR_MESSAGES: 'DEBUG_CLEAR_MESSAGES',
   DEBUG_CLEAR_LOGS: 'DEBUG_CLEAR_LOGS',
   GENERATE_PARTICIPATION: 'GENERATE_PARTICIPATION',

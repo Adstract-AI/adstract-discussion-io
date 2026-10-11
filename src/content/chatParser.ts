@@ -1,7 +1,25 @@
 import type { ChatMessage } from '../types/chat'
 
+export interface ChatParserDebugSnapshot {
+  containerFound: boolean
+  containerTag?: string
+  containerClass?: string
+  innerContainerFound: boolean
+  candidateCount: number
+  parsedCount: number
+  systemSkipped: number
+  noIndexSkipped: number
+  emptySkipped: number
+  sampleCandidates: string[]
+  sampleMessages: Array<Pick<ChatMessage, 'username' | 'studentIndex' | 'text' | 'rawTimestamp'>>
+}
+
 const CHAT_CONTAINER_SELECTORS = [
   '.ReactVirtualized__Grid.ReactVirtualized__List[class*="messageList--"]',
+  '[data-test="chatMessages"] .ReactVirtualized__Grid.ReactVirtualized__List',
+  '[data-test="chatMessages"]',
+  '[data-test="publicChat"] .ReactVirtualized__Grid.ReactVirtualized__List',
+  '[data-test="publicChat"]',
   '[data-testid="chatMessages"]',
   '[aria-label*="chat" i][role="log"]',
   '[aria-label*="chat" i] [role="list"]',
@@ -15,7 +33,12 @@ const CHAT_CONTAINER_SELECTORS = [
 
 const VIRTUALIZED_INNER_SELECTOR = '.ReactVirtualized__Grid__innerScrollContainer'
 
-const PRIMARY_MESSAGE_NODE_SELECTOR = ':scope > span > div[class*="item--"]'
+const PRIMARY_MESSAGE_NODE_SELECTORS = [
+  ':scope > span > div[class*="item--"]',
+  ':scope > span div[class*="item--"]',
+  ':scope > span > div > div[class*="item--"]',
+  ':scope > span',
+] as const
 
 const CHAT_MESSAGE_NODE_SELECTORS = [
   '[data-testid*="chatmessage" i]',
@@ -35,6 +58,7 @@ const CHAT_INPUT_SELECTORS = [
 
 const USERNAME_SELECTORS = [
   '[class*="name--"]',
+  '[data-test="chatUserName"]',
   '[data-testid="chatUser"]',
   '[class*="user" i]',
   '[class*="sender" i]',
@@ -44,6 +68,7 @@ const USERNAME_SELECTORS = [
 
 const MESSAGE_SELECTORS = [
   'p[data-test="chatUserMessageText"]',
+  '[data-test="chatUserMessageText"]',
   '[data-testid="chatMessage"]',
   '[class*="message" i]',
   '[class*="content" i]',
@@ -54,6 +79,7 @@ const MESSAGE_SELECTORS = [
 
 const TIMESTAMP_SELECTORS = [
   'time[class*="time--"]',
+  '[data-test="chatMessageTime"]',
   'time',
   '[data-testid="chatTime"]',
   '[class*="time" i]',
@@ -172,6 +198,18 @@ function extractStudentIndex(username: string): string | undefined {
   return match[1]
 }
 
+function extractStudentIndexFromAnyText(value: string): string | undefined {
+  const match = value.match(/\((\d{4,})\)/)
+  if (!match) {
+    return undefined
+  }
+  return match[1]
+}
+
+function resolveStudentIndex(username: string, combinedText: string): string {
+  return extractStudentIndex(username) ?? extractStudentIndexFromAnyText(combinedText) ?? '-1'
+}
+
 function buildMessageId(message: Omit<ChatMessage, 'id'>, index: number): string {
   const raw = `${message.username}|${message.text}|${message.timestamp}|${index}`
   return `msg-${stableHash(raw)}`
@@ -181,11 +219,26 @@ function collectMessageCandidates(container: Element): Element[] {
   const innerContainer = findVirtualizedInnerContainer(container)
 
   if (innerContainer) {
-    const primaryNodes = Array.from(innerContainer.querySelectorAll(PRIMARY_MESSAGE_NODE_SELECTOR))
+    const messageTextAnchors = Array.from(innerContainer.querySelectorAll('[data-test="chatUserMessageText"]'))
+      .map((node) => {
+        if (!(node instanceof Element)) {
+          return null
+        }
+        return node.closest('div[class*="item--"], span')
+      })
       .filter((node): node is Element => node instanceof Element)
 
-    if (primaryNodes.length > 0) {
-      return primaryNodes
+    if (messageTextAnchors.length > 0) {
+      return messageTextAnchors
+    }
+
+    for (const selector of PRIMARY_MESSAGE_NODE_SELECTORS) {
+      const primaryNodes = Array.from(innerContainer.querySelectorAll(selector))
+        .filter((node): node is Element => node instanceof Element)
+
+      if (primaryNodes.length > 0) {
+        return primaryNodes
+      }
     }
   }
 
@@ -248,7 +301,7 @@ export function parseChatMessage(node: Element): ChatMessage | null {
   const timestampRaw = firstTimestampValue(node)
 
   const username = usernameRaw && looksLikeUsernameCandidate(usernameRaw) ? usernameRaw : 'Unknown'
-  const studentIndex = extractStudentIndex(username)
+  const studentIndex = resolveStudentIndex(username, combinedText)
   const text = normalizeText(messageText)
 
   if (!text || text.length < 2) {
@@ -294,10 +347,6 @@ export function extractRecentMessages(root: ParentNode = document, limit = 20): 
       return
     }
 
-    if (!parsed.studentIndex) {
-      return
-    }
-
     const id = buildMessageId(parsed, index)
     const withId: ChatMessage = { ...parsed, id }
     const fingerprint = `${withId.username}|${withId.text}|${withId.timestamp}`
@@ -308,4 +357,57 @@ export function extractRecentMessages(root: ParentNode = document, limit = 20): 
 
   const sorted = Array.from(dedup.values()).sort((a, b) => a.timestamp - b.timestamp)
   return sorted.slice(Math.max(0, sorted.length - limit))
+}
+
+export function debugExtractRecentMessages(root: ParentNode = document, limit = 20): ChatParserDebugSnapshot {
+  const container = findChatContainer(root)
+  const innerContainer = container ? findVirtualizedInnerContainer(container) : null
+  const candidates = container ? collectMessageCandidates(container) : []
+
+  let parsedCount = 0
+  let systemSkipped = 0
+  let emptySkipped = 0
+  const sampleMessages: ChatParserDebugSnapshot['sampleMessages'] = []
+
+  candidates.forEach((node) => {
+    const parsed = parseChatMessage(node)
+    if (!parsed) {
+      emptySkipped += 1
+      return
+    }
+
+    if (isSystemMessage(node, parsed)) {
+      systemSkipped += 1
+      return
+    }
+
+    parsedCount += 1
+    if (sampleMessages.length < 5) {
+      sampleMessages.push({
+        username: parsed.username,
+        studentIndex: parsed.studentIndex,
+        text: parsed.text,
+        rawTimestamp: parsed.rawTimestamp,
+      })
+    }
+  })
+
+  const sampleCandidates = candidates.slice(0, 5).map((node) => {
+    const text = normalizeText(node.textContent ?? '')
+    return `${node.tagName.toLowerCase()}.${node.className || '(no-class)'} :: ${text.slice(0, 140)}`
+  })
+
+  return {
+    containerFound: Boolean(container),
+    containerTag: container?.tagName.toLowerCase(),
+    containerClass: container?.className,
+    innerContainerFound: Boolean(innerContainer),
+    candidateCount: candidates.length,
+    parsedCount: Math.min(parsedCount, limit),
+    systemSkipped,
+    noIndexSkipped: 0,
+    emptySkipped,
+    sampleCandidates,
+    sampleMessages,
+  }
 }

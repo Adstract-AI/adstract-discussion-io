@@ -1,8 +1,7 @@
 import { MESSAGE_TYPES, type AutofillTextResult, type RecentMessagesResult, type RuntimeMessage } from '../types/chat'
-import { extractRecentMessages, findChatContainer, findChatInput, findVirtualizedInnerContainer } from './chatParser'
+import { debugExtractRecentMessages, extractRecentMessages, findChatContainer, findChatInput, findVirtualizedInnerContainer } from './chatParser'
 
 const LOG_PREFIX = '[ContentScript]'
-const DEV_MODE = import.meta.env.DEV
 const MAX_CAPTURE_SCAN = 200
 const DEEP_FETCH_MAX_STEPS = 60
 const DEEP_FETCH_STEP_MS = 140
@@ -15,9 +14,26 @@ declare global {
 }
 
 function log(...args: unknown[]): void {
-  if (DEV_MODE) {
-    console.debug(LOG_PREFIX, ...args)
-  }
+  console.log(LOG_PREFIX, ...args)
+  const text = args.map((value) => {
+    if (typeof value === 'string') {
+      return value
+    }
+    try {
+      return JSON.stringify(value)
+    } catch {
+      return String(value)
+    }
+  }).join(' ')
+
+  void chrome.runtime.sendMessage({
+    type: MESSAGE_TYPES.CONTENT_DEBUG_LOG,
+    payload: {
+      message: text,
+    },
+  }).catch(() => {
+    // Ignore if the background worker is unavailable.
+  })
 }
 
 function likelyBigBlueButtonPage(): boolean {
@@ -136,12 +152,22 @@ async function buildRecentMessagesResult(limit: number, deepFetch: boolean): Pro
     }
   }
 
-  const dedup = collectVisibleMessages()
+  const initialDebug = debugExtractRecentMessages(document, limit)
+  log('FETCH_RECENT_MESSAGES initial parser snapshot:', initialDebug)
 
-  if (deepFetch) {
+  const dedup = collectVisibleMessages()
+  log('Visible messages before deep fetch:', dedup.size)
+
+  if (deepFetch && dedup.size < limit) {
     const scrollTarget = container instanceof HTMLElement ? container : (innerContainer as HTMLElement)
     const originalScrollTop = scrollTarget.scrollTop
-    log('Deep fetch using scroll target:', scrollTarget.className || scrollTarget.tagName)
+    log('Deep fetch using scroll target:', {
+      className: scrollTarget.className || '',
+      tagName: scrollTarget.tagName,
+      scrollTop: scrollTarget.scrollTop,
+      scrollHeight: scrollTarget.scrollHeight,
+      clientHeight: scrollTarget.clientHeight,
+    })
     let stagnantSteps = 0
     let previousMessageCount = dedup.size
 
@@ -161,7 +187,18 @@ async function buildRecentMessagesResult(limit: number, deepFetch: boolean): Pro
         }
       })
 
+      if (dedup.size >= limit) {
+        log(`Deep fetch stopping early after step ${step + 1}; collected ${dedup.size}/${limit} messages.`)
+        break
+      }
+
       const nowTop = scrollTarget.scrollTop
+      log(`Deep fetch step ${step + 1}:`, {
+        previousTop,
+        nowTop,
+        collected: dedup.size,
+        snapshotSize: snapshot.size,
+      })
       if (dedup.size === previousMessageCount || nowTop === previousTop) {
         stagnantSteps += 1
       } else {
@@ -177,10 +214,13 @@ async function buildRecentMessagesResult(limit: number, deepFetch: boolean): Pro
     scrollTarget.scrollTop = originalScrollTop
     scrollTarget.dispatchEvent(new Event('scroll', { bubbles: true }))
     container.dispatchEvent(new Event('scroll', { bubbles: true }))
+  } else if (deepFetch) {
+    log(`Deep fetch skipped because enough messages were already visible (${dedup.size}/${limit}).`)
   }
 
   const sorted = Array.from(dedup.values()).sort((a, b) => a.timestamp - b.timestamp)
   const messages = sorted.slice(Math.max(0, sorted.length - limit))
+  log('FETCH_RECENT_MESSAGES final messages sample:', messages.slice(0, 5))
   log(`FETCH_RECENT_MESSAGES parsed ${messages.length} messages (limit=${limit}, deepFetch=${deepFetch})`)
   return {
     messages,

@@ -416,28 +416,113 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number, dee
       const wait = (ms: number): Promise<void> => new Promise((resolve) => window.setTimeout(resolve, ms))
       const selectors = [
         '.ReactVirtualized__Grid.ReactVirtualized__List[class*="messageList--"]',
+        '[data-test="chatMessages"] .ReactVirtualized__Grid.ReactVirtualized__List',
+        '[data-test="chatMessages"]',
+        '[data-test="publicChat"] .ReactVirtualized__Grid.ReactVirtualized__List',
+        '[data-test="publicChat"]',
         '[data-testid="chatMessages"]',
         '[class*="chat" i]',
       ]
       const container = selectors.map((s) => document.querySelector(s)).find((el) => el)
       if (!container) {
-        return { messages: [], error: 'Chat container not found.' }
+        return { messages: [], error: 'Chat container not found.', debug: { selectorsTried: selectors } }
       }
 
       const inner = container.querySelector('.ReactVirtualized__Grid__innerScrollContainer')
       if (!inner) {
-        return { messages: [], error: 'Virtualized inner chat container not found.' }
+        return {
+          messages: [],
+          error: 'Virtualized inner chat container not found.',
+          debug: {
+            containerTag: container.tagName,
+            containerClass: (container as HTMLElement).className ?? '',
+          },
+        }
       }
 
-      const parseVisibleMessages = (): Array<{
-        id: string
-        username: string
-        studentIndex?: string
-        text: string
-        timestamp: number
-        rawTimestamp?: string
-      }> => {
-        const nodes = Array.from(inner.querySelectorAll(':scope > span > div[class*="item--"]'))
+      const parseTimestamp = (rawTimestamp: string | undefined): number => {
+        if (!rawTimestamp) {
+          return Date.now()
+        }
+
+        const parsed = Date.parse(rawTimestamp)
+        if (!Number.isNaN(parsed)) {
+          return parsed
+        }
+
+        const today = new Date()
+        const timeMatch = rawTimestamp.match(/(\d{1,2}):(\d{2})\s*(am|pm)?/i)
+        if (!timeMatch) {
+          return Date.now()
+        }
+
+        const hoursFromText = Number(timeMatch[1])
+        const minutes = Number(timeMatch[2])
+        const amPm = timeMatch[3]?.toLowerCase()
+
+        let hours = hoursFromText
+        if (amPm === 'pm' && hours < 12) {
+          hours += 12
+        }
+        if (amPm === 'am' && hours === 12) {
+          hours = 0
+        }
+
+        today.setHours(hours, minutes, 0, 0)
+        return today.getTime()
+      }
+
+      const extractStudentIndexFromAnyText = (value: string): string | undefined => {
+        const match = value.match(/\((\d{4,})\)/)
+        if (!match) {
+          return undefined
+        }
+        return match[1]
+      }
+
+      const resolveStudentIndex = (username: string, combinedText: string): string =>
+        username.match(/\((\d+)\)/)?.[1] ?? extractStudentIndexFromAnyText(combinedText) ?? '-1'
+
+      const collectCandidateNodes = (): Element[] => {
+        const messageTextAnchors = Array.from(inner.querySelectorAll('[data-test="chatUserMessageText"]'))
+          .map((node) => node.closest('div[class*="item--"], span'))
+          .filter((node): node is Element => node instanceof Element)
+
+        if (messageTextAnchors.length > 0) {
+          return messageTextAnchors
+        }
+
+        const primarySelectors = [
+          ':scope > span > div[class*="item--"]',
+          ':scope > span div[class*="item--"]',
+          ':scope > span > div > div[class*="item--"]',
+          ':scope > span',
+        ]
+
+        for (const selector of primarySelectors) {
+          const nodes = Array.from(inner.querySelectorAll(selector)).filter((node): node is Element => node instanceof Element)
+          if (nodes.length > 0) {
+            return nodes
+          }
+        }
+
+        return Array.from(inner.children).filter((node): node is Element => node instanceof Element)
+      }
+
+      const parseVisibleMessages = (): {
+        messages: Array<{
+          id: string
+          username: string
+          studentIndex?: string
+          text: string
+          timestamp: number
+          rawTimestamp?: string
+        }>
+        emptySkipped: number
+        noIndexSkipped: number
+      } => {
+        const nodes = collectCandidateNodes()
+        let emptySkipped = 0
         const messages: Array<{
           id: string
           username: string
@@ -447,22 +532,22 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number, dee
           rawTimestamp?: string
         }> = []
         nodes.forEach((node, index) => {
+          const combinedText = normalizeText(node.textContent ?? '')
           const username =
-            normalizeText(node.querySelector('[class*="name--"]')?.textContent ?? '') || 'Unknown'
-          const studentIndexMatch = username.match(/\((\d+)\)/)
-          const studentIndex = studentIndexMatch?.[1]
+            normalizeText(node.querySelector('[class*="name--"], [data-test="chatUserName"]')?.textContent ?? '') || 'Unknown'
+          const studentIndex = resolveStudentIndex(username, combinedText)
           const text =
-            normalizeText(node.querySelector('p[data-test="chatUserMessageText"]')?.textContent ?? '') ||
-            normalizeText(node.textContent ?? '')
+            normalizeText(node.querySelector('p[data-test="chatUserMessageText"], [data-test="chatUserMessageText"]')?.textContent ?? '') ||
+            combinedText
           const timeEl = node.querySelector('time[class*="time--"], time')
           const rawTimestamp =
             normalizeText((timeEl as HTMLTimeElement | null)?.dateTime ?? '') ||
             normalizeText(timeEl?.getAttribute('datetime') ?? '') ||
             normalizeText(timeEl?.textContent ?? '')
-          const parsedTimestamp = Date.parse(rawTimestamp)
-          const timestamp = Number.isNaN(parsedTimestamp) ? Date.now() : parsedTimestamp
+          const timestamp = parseTimestamp(rawTimestamp)
 
-          if (!text || !studentIndex) {
+          if (!text) {
+            emptySkipped += 1
             return
           }
 
@@ -475,12 +560,34 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number, dee
             rawTimestamp: rawTimestamp || undefined,
           })
         })
-        return messages
+        return {
+          messages,
+          emptySkipped,
+          noIndexSkipped: 0,
+        }
       }
 
-      const dedup = new Map<string, ReturnType<typeof parseVisibleMessages>[number]>()
+      const dedup = new Map<
+        string,
+        {
+          id: string
+          username: string
+          studentIndex?: string
+          text: string
+          timestamp: number
+          rawTimestamp?: string
+        }
+      >()
+      let lastVisibleNodeCount = 0
+      let lastEmptySkipped = 0
+      let lastNoIndexSkipped = 0
       const collect = (): void => {
-        const messages = parseVisibleMessages()
+        const nodes = collectCandidateNodes()
+        lastVisibleNodeCount = nodes.length
+        const parsed = parseVisibleMessages()
+        lastEmptySkipped = parsed.emptySkipped
+        lastNoIndexSkipped = parsed.noIndexSkipped
+        const messages = parsed.messages
         messages.forEach((m) => {
           const key = `${m.studentIndex ?? ''}|${m.username}|${m.text}|${m.timestamp}`
           if (!dedup.has(key)) {
@@ -491,7 +598,7 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number, dee
 
       collect()
 
-      if (shouldDeepFetch) {
+      if (shouldDeepFetch && dedup.size < fetchLimit) {
         const scrollTarget = container instanceof HTMLElement ? container : (inner as HTMLElement)
         const originalScrollTop = scrollTarget.scrollTop
         let stagnantSteps = 0
@@ -504,6 +611,9 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number, dee
           container.dispatchEvent(new Event('scroll', { bubbles: true }))
           await wait(140)
           collect()
+          if (dedup.size >= fetchLimit) {
+            break
+          }
           const nowTop = scrollTarget.scrollTop
           if (dedup.size === previousCount || nowTop === previousTop) {
             stagnantSteps += 1
@@ -521,12 +631,32 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number, dee
       }
 
       const sorted = Array.from(dedup.values()).sort((a, b) => a.timestamp - b.timestamp)
-      return { messages: sorted.slice(Math.max(0, sorted.length - fetchLimit)) }
+      return {
+        messages: sorted.slice(Math.max(0, sorted.length - fetchLimit)),
+        debug: {
+          containerTag: container.tagName,
+          containerClass: (container as HTMLElement).className ?? '',
+          innerClass: (inner as HTMLElement).className ?? '',
+          visibleNodeCount: lastVisibleNodeCount,
+          totalCollected: dedup.size,
+          emptySkipped: lastEmptySkipped,
+          noIndexSkipped: lastNoIndexSkipped,
+          sampleText: sorted.slice(0, 3).map((message) => ({
+            username: message.username,
+            text: message.text,
+            studentIndex: message.studentIndex,
+          })),
+        },
+      }
     },
     args: [limit, deepFetch],
   })
 
-  const result = execution[0]?.result as { messages?: ChatMessage[]; error?: string } | undefined
+  const result = execution[0]?.result as {
+    messages?: ChatMessage[]
+    error?: string
+    debug?: Record<string, unknown>
+  } | undefined
   if (!result) {
     throw new Error('Fallback scripting did not return a result.')
   }
@@ -534,6 +664,9 @@ async function fetchRecentMessagesViaScripting(tabId: number, limit: number, dee
     throw new Error(result.error)
   }
 
+  if (result.debug) {
+    addDebugLog(`Scripting fallback debug: ${JSON.stringify(result.debug)}`)
+  }
   addDebugLog(`Scripting fallback returned ${result.messages?.length ?? 0} messages.`)
   return result.messages ?? []
 }
@@ -1436,6 +1569,17 @@ async function handleRuntimeMessage(message: unknown): Promise<unknown> {
     }
     sendPopupStateUpdate()
     await persistState()
+    return { success: true }
+  }
+
+  if (message.type === MESSAGE_TYPES.CONTENT_DEBUG_LOG) {
+    const payload = message.payload as { message?: string } | undefined
+    const text = typeof payload?.message === 'string' ? payload.message.trim() : ''
+    if (text) {
+      addDebugLog(`[Content] ${text}`)
+      sendPopupStateUpdate()
+      await persistState()
+    }
     return { success: true }
   }
 
